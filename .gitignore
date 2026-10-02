@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Node modules & builds
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Build artifacts
+build/
+*.exe
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+
+# Logs and environment
+*.log
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+.DS_Store

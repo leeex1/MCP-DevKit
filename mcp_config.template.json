@@ -1,0 +1,49 @@
+{
+  "mcpServers": {
+    "QuillanThinking": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_thinking_engine/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    "QuillanCouncil": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_council/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    "QuillanCode": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_code/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    "QuillanGovernor": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_governor/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    "QuillanPrism": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_prism/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    "QuillanRAG": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_rag/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    "RoninBuddy": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_buddy/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    "SamuraiEngine": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_samurai_engine/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    },
+    "QuillanModelLab": {
+      "command": "python",
+      "args": ["mcp-servers/quillan_model_lab/server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    }
+  }
+}

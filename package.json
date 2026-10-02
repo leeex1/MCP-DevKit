@@ -1,0 +1,12 @@
+{
+  "name": "mcp-devkit",
+  "version": "1.0.0",
+  "description": "Quillan-Ronin MCP Servers and Developer Validation Suite",
+  "scripts": {
+    "dev": "npm run --prefix devkit/frontend dev",
+    "build": "npm run --prefix devkit/frontend build",
+    "preview": "npm run --prefix devkit/frontend preview"
+  },
+  "author": "CrashOverrideX",
+  "license": "MIT"
+}
