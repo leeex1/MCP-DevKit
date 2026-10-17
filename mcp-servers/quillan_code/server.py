@@ -2,13 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 ⚡ QUILLAN-RONIN CODEWEAVER ENGINE — NATIVE FAST-MCP SERVER
-===========================================================
+==========================================================
 Embodying C10-CODEWEAVER, C25-PROMETHEUS, and C13-WARDEN:
   1. AST Structure & Complexity Inspection (Cyclomatic Complexity, Typings, Docstrings)
-  2. Static Security & Hygiene Scanner (CWE-89, CWE-78, CWE-22, CWE-502, CWE-798, ReDoS)
+  2. Static Security & Hygiene Scanner (CWE-89, CWE-78, CWE-22, CWE-502, CWE-798, ReDoS, +more)
   3. Sovereign Refactoring Adviser (SOLID, Coupling, Test Seams, Decoupling)
   4. Unit Test Scaffold Generator (Happy Path, Boundaries, Edge Cases, Invariants)
   5. Unified Diff Linter & Continuity Validator
+  6. Dependency Audit (risky/deprecated imports)
+  7. Complexity Gate (threshold enforcement)
+  8. Full Pipeline (scan + predator strike + review) with persistence
+  9. Fix-It Scaffold Generator
+  10. Session persistence + replay
 """
 
 import sys
@@ -17,6 +22,8 @@ import ast
 import re
 import math
 import json
+import time
+import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -28,11 +35,12 @@ from fastmcp import FastMCP
 
 mcp = FastMCP("QuillanCode")
 
+SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_code\sessions")
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─── 1. AST INSPECTION & COMPLEXITY ──────────────────────────────────────────
 
 class ComplexityVisitor(ast.NodeVisitor):
-    """Calculates McCabe Cyclomatic Complexity and tallies structural elements."""
     def __init__(self):
         self.complexity = 1
         self.functions = 0
@@ -47,12 +55,9 @@ class ComplexityVisitor(ast.NodeVisitor):
         if ast.get_docstring(node):
             self.docstrings += 1
         for arg in node.args.args:
-            if arg.arg == "self":
-                continue
-            if arg.annotation:
-                self.typed_args += 1
-            else:
-                self.untyped_args += 1
+            if arg.arg == "self": continue
+            if arg.annotation: self.typed_args += 1
+            else: self.untyped_args += 1
         self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node):
@@ -60,12 +65,9 @@ class ComplexityVisitor(ast.NodeVisitor):
         if ast.get_docstring(node):
             self.docstrings += 1
         for arg in node.args.args:
-            if arg.arg == "self":
-                continue
-            if arg.annotation:
-                self.typed_args += 1
-            else:
-                self.untyped_args += 1
+            if arg.arg == "self": continue
+            if arg.annotation: self.typed_args += 1
+            else: self.untyped_args += 1
         self.generic_visit(node)
 
     def visit_ClassDef(self, node):
@@ -85,30 +87,12 @@ class ComplexityVisitor(ast.NodeVisitor):
             self.imports.append(f"{mod}.{alias.name}")
         self.generic_visit(node)
 
-    def visit_If(self, node):
-        self.complexity += 1
-        self.generic_visit(node)
-
-    def visit_For(self, node):
-        self.complexity += 1
-        self.generic_visit(node)
-
-    def visit_AsyncFor(self, node):
-        self.complexity += 1
-        self.generic_visit(node)
-
-    def visit_While(self, node):
-        self.complexity += 1
-        self.generic_visit(node)
-
-    def visit_ExceptHandler(self, node):
-        self.complexity += 1
-        self.generic_visit(node)
-
-    def visit_With(self, node):
-        self.complexity += 1
-        self.generic_visit(node)
-
+    def visit_If(self, node): self.complexity += 1; self.generic_visit(node)
+    def visit_For(self, node): self.complexity += 1; self.generic_visit(node)
+    def visit_AsyncFor(self, node): self.complexity += 1; self.generic_visit(node)
+    def visit_While(self, node): self.complexity += 1; self.generic_visit(node)
+    def visit_ExceptHandler(self, node): self.complexity += 1; self.generic_visit(node)
+    def visit_With(self, node): self.complexity += 1; self.generic_visit(node)
     def visit_BoolOp(self, node):
         self.complexity += len(node.values) - 1
         self.generic_visit(node)
@@ -116,11 +100,7 @@ class ComplexityVisitor(ast.NodeVisitor):
 
 @mcp.tool()
 def codeweaver_ast_inspect(code_or_file_path: str) -> Dict[str, Any]:
-    """Inspects Python code or a file path to return AST metrics, McCabe complexity, and typing coverage.
-    
-    Args:
-        code_or_file_path: Raw Python code or an absolute path to a .py file.
-    """
+    """Inspects Python code or a file path to return AST metrics, McCabe complexity, and typing coverage."""
     code = code_or_file_path
     path = Path(code_or_file_path.strip().strip('"\''))
     if path.exists() and path.is_file():
@@ -128,24 +108,15 @@ def codeweaver_ast_inspect(code_or_file_path: str) -> Dict[str, Any]:
             code = path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
             return {"error": f"Failed to read file: {e}"}
-
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
-        return {
-            "status": "SYNTAX_ERROR",
-            "line": e.lineno,
-            "offset": e.offset,
-            "text": e.text,
-            "msg": str(e),
-        }
-
+        return {"status": "SYNTAX_ERROR", "line": e.lineno, "offset": e.offset,
+                "text": e.text, "msg": str(e)}
     visitor = ComplexityVisitor()
     visitor.visit(tree)
-
     total_args = visitor.typed_args + visitor.untyped_args
     typing_ratio = round((visitor.typed_args / total_args) * 100, 1) if total_args > 0 else 100.0
-
     return {
         "status": "VALID_AST",
         "cyclomatic_complexity": visitor.complexity,
@@ -162,57 +133,48 @@ def codeweaver_ast_inspect(code_or_file_path: str) -> Dict[str, Any]:
 # ─── 2. STATIC SECURITY & HYGIENE SCANNER ───────────────────────────────────
 
 SECURITY_RULES = [
-    {
-        "id": "CWE-89",
-        "title": "SQL Injection Risk",
-        "pattern": r"(SELECT\s+.*FROM|INSERT\s+INTO|UPDATE\s+.*SET|DELETE\s+FROM).*(%s|\+.*format|f[\"'].*\{)",
-        "severity": "CRITICAL",
-        "fix": "Use parameterized queries or ORM binds instead of string concatenation/f-strings.",
-    },
-    {
-        "id": "CWE-78",
-        "title": "OS Command Injection Risk",
-        "pattern": r"(os\.system|subprocess\.Popen|subprocess\.call|subprocess\.run)\s*\(\s*(f[\"']|.*%\s*|.*\+\s*)",
-        "severity": "CRITICAL",
-        "fix": "Pass command arguments as a list with shell=False; sanitize untrusted input.",
-    },
-    {
-        "id": "CWE-22",
-        "title": "Path Traversal Risk",
-        "pattern": r"open\s*\(\s*(f[\"'].*\{|.*\+\s*|.*\.format\()",
-        "severity": "HIGH",
-        "fix": "Resolve and canonicalize paths using Path.resolve(), ensuring it remains inside allowed root directory.",
-    },
-    {
-        "id": "CWE-502",
-        "title": "Insecure Deserialization",
-        "pattern": r"(pickle\.loads|pickle\.load|_pickle\.load|yaml\.load\s*\([^,)]+\))",
-        "severity": "CRITICAL",
-        "fix": "Avoid pickle on untrusted data; use json, safe_load, or protobuf.",
-    },
-    {
-        "id": "CWE-798",
-        "title": "Hardcoded Secret / API Key",
-        "pattern": r"(api[_-]?key|secret|password|token|bearer)\s*=\s*['\"][A-Za-z0-9_\-]{16,}['\"]",
-        "severity": "HIGH",
-        "fix": "Retrieve secrets via environment variables or secret managers (e.g. os.environ).",
-    },
-    {
-        "id": "HYGIENE-SILENT-EXCEPT",
-        "title": "Silent Exception Swallowing",
-        "pattern": r"except(\s+Exception)?\s*:\s*\n\s*pass\b",
-        "severity": "MEDIUM",
-        "fix": "Log exceptions with context using standard logging, or raise a custom domain error.",
-    },
+    {"id": "CWE-89", "title": "SQL Injection Risk",
+     "pattern": r"(SELECT\s+.*FROM|INSERT\s+INTO|UPDATE\s+.*SET|DELETE\s+FROM).*(%s|\+.*format|f[\"'].*\{)",
+     "severity": "CRITICAL", "fix": "Use parameterized queries or ORM binds instead of string concatenation/f-strings."},
+    {"id": "CWE-78", "title": "OS Command Injection Risk",
+     "pattern": r"(os\.system|subprocess\.Popen|subprocess\.call|subprocess\.run)\s*\(\s*(f[\"']|.*%\s*|.*\+\s*)",
+     "severity": "CRITICAL", "fix": "Pass command arguments as a list with shell=False; sanitize untrusted input."},
+    {"id": "CWE-22", "title": "Path Traversal Risk",
+     "pattern": r"open\s*\(\s*(f[\"'].*\{|.*\+\s*|.*\.format\()",
+     "severity": "HIGH", "fix": "Resolve and canonicalize paths using Path.resolve(), ensuring it remains inside allowed root directory."},
+    {"id": "CWE-502", "title": "Insecure Deserialization",
+     "pattern": r"(pickle\.loads|pickle\.load|_pickle\.load|yaml\.load\s*\([^,)]+\))",
+     "severity": "CRITICAL", "fix": "Avoid pickle on untrusted data; use json, safe_load, or protobuf."},
+    {"id": "CWE-798", "title": "Hardcoded Secret / API Key",
+     "pattern": r"(api[_-]?key|secret|password|token|bearer)\s*=\s*['\"][A-Za-z0-9_\-]{16,}['\"]",
+     "severity": "HIGH", "fix": "Retrieve secrets via environment variables or secret managers (e.g. os.environ)."},
+    {"id": "HYGIENE-SILENT-EXCEPT", "title": "Silent Exception Swallowing",
+     "pattern": r"except(\s+Exception)?\s*:\s*\n\s*pass\b",
+     "severity": "MEDIUM", "fix": "Log exceptions with context using standard logging, or raise a custom domain error."},
+    {"id": "CWE-94", "title": "Dynamic Code Execution Risk",
+     "pattern": r"\b(eval|exec)\s*\(",
+     "severity": "CRITICAL", "fix": "Avoid eval/exec on untrusted input; use ast.literal_eval or a sandboxed interpreter."},
+    {"id": "CWE-327", "title": "Weak Cryptography",
+     "pattern": r"\b(md5|sha1)\s*\(",
+     "severity": "MEDIUM", "fix": "Use SHA-256 or stronger; avoid MD5/SHA1 for security-sensitive hashing."},
+    {"id": "RE DOS", "title": "Potential ReDoS Pattern",
+     "pattern": r"re\.(compile|match|search|findall)\s*\(\s*r?['\"].*(\(\.\*\)\+|\(\.\+\)\*|\(\.\*\)\{)",
+     "severity": "MEDIUM", "fix": "Audit regex for catastrophic backtracking; add timeouts or use re2/regex with limits."},
 ]
 
+DEPENDENCY_RISK = {
+    "pickle": "Insecure deserialization (CWE-502)",
+    "yaml": "Use yaml.safe_load only",
+    "subprocess": "Validate shell=False and sanitize args",
+    "os.system": "Avoid; use subprocess with list args",
+    "eval": "Avoid dynamic execution",
+    "exec": "Avoid dynamic execution",
+}
+
+
 @mcp.tool()
-def codeweaver_security_scan(code_or_file_path: str) -> Dict[str, Any]:
-    """Scans code or a file for security vulnerabilities, CWEs, and hygiene anti-patterns.
-    
-    Args:
-        code_or_file_path: Raw code or path to file to scan.
-    """
+def codeweaver_security_scan(code_or_file_path: str, persist: bool = False) -> Dict[str, Any]:
+    """Scans code or a file for security vulnerabilities, CWEs, and hygiene anti-patterns."""
     code = code_or_file_path
     path = Path(code_or_file_path.strip().strip('"\''))
     if path.exists() and path.is_file():
@@ -237,10 +199,83 @@ def codeweaver_security_scan(code_or_file_path: str) -> Dict[str, Any]:
                     "remediation": rule["fix"],
                 })
 
-    return {
+    result = {
         "total_findings": len(findings),
         "status": "PASS" if not findings else ("FAIL" if any(f["severity"] == "CRITICAL" for f in findings) else "WARN"),
         "findings": findings,
+        "timestamp": time.time(),
+    }
+
+    if persist:
+        try:
+            sid = f"scan-{int(time.time())}"
+            p = SESSION_DIR / f"{sid}.json"
+            p.write_text(json.dumps({"type": "security_scan", "result": result}, indent=2), encoding="utf-8")
+            result["persisted_to"] = str(p)
+        except Exception as e:
+            result["persist_error"] = str(e)
+
+    return result
+
+
+@mcp.tool()
+def codeweaver_dependency_audit(code_or_file_path: str) -> Dict[str, Any]:
+    """Audits imports in code/file for risky or deprecated modules."""
+    code = code_or_file_path
+    path = Path(code_or_file_path.strip().strip('"\''))
+    if path.exists() and path.is_file():
+        try:
+            code = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return {"error": f"Failed to read file: {e}"}
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return {"error": f"Syntax error: {e}"}
+
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                imports.append(a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imports.append(node.module.split(".")[0])
+
+    risky = []
+    for imp in sorted(set(imports)):
+        if imp in DEPENDENCY_RISK:
+            risky.append({"module": imp, "concern": DEPENDENCY_RISK[imp]})
+
+    return {
+        "total_imports": len(set(imports)),
+        "imports": sorted(set(imports)),
+        "risky_imports": risky,
+        "status": "PASS" if not risky else "WARN",
+    }
+
+
+@mcp.tool()
+def codeweaver_complexity_gate(code_or_file_path: str, max_complexity: int = 20,
+                              min_type_coverage: float = 70.0) -> Dict[str, Any]:
+    """Enforces complexity and type-coverage thresholds."""
+    inspect = codeweaver_ast_inspect(code_or_file_path)
+    if inspect.get("status") != "VALID_AST":
+        return {"status": "SKIP", "reason": inspect.get("status"), "detail": inspect}
+    cc = inspect["cyclomatic_complexity"]
+    cov = inspect["type_hint_coverage_pct"]
+    failures = []
+    if cc > max_complexity:
+        failures.append(f"Cyclomatic complexity {cc} exceeds max {max_complexity}")
+    if cov < min_type_coverage:
+        failures.append(f"Type coverage {cov}% below min {min_type_coverage}%")
+    return {
+        "status": "PASS" if not failures else "FAIL",
+        "cyclomatic_complexity": cc,
+        "type_hint_coverage_pct": cov,
+        "max_complexity": max_complexity,
+        "min_type_coverage": min_type_coverage,
+        "failures": failures,
     }
 
 
@@ -248,50 +283,29 @@ def codeweaver_security_scan(code_or_file_path: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def codeweaver_refactor_adviser(function_code: str, goal: str = "production_hardening") -> Dict[str, Any]:
-    """Generates structured architectural refactoring advice aligned with C25-PROMETHEUS and C10-CODEWEAVER.
-    
-    Args:
-        function_code: Snippet of code to evaluate for refactoring.
-        goal: Target objective (e.g., 'production_hardening', 'performance', 'testability').
-    """
+    """Generates structured architectural refactoring advice."""
     recommendations = []
-    
     has_hints = bool(re.search(r"def\s+\w+\s*\([^)]*:[^)]*\)\s*->", function_code))
     if not has_hints:
-        recommendations.append({
-            "dimension": "Type Safety",
+        recommendations.append({"dimension": "Type Safety",
             "action": "Add explicit Python 3.10+ type annotations to arguments and return signatures.",
-            "impact": "Enables compile-time mypy validation and self-documenting IDE contracts."
-        })
-
+            "impact": "Enables compile-time mypy validation and self-documenting IDE contracts."})
     if "open(" in function_code and "with " not in function_code:
-        recommendations.append({
-            "dimension": "Resource Hygiene",
+        recommendations.append({"dimension": "Resource Hygiene",
             "action": "Wrap file/socket I/O in deterministic context managers ('with' statement).",
-            "impact": "Prevents OS file descriptor leaks across failure paths."
-        })
-
+            "impact": "Prevents OS file descriptor leaks across failure paths."})
     if "print(" in function_code:
-        recommendations.append({
-            "dimension": "Observability",
+        recommendations.append({"dimension": "Observability",
             "action": "Replace print statements with injected structured logging (logging.getLogger).",
-            "impact": "Allows production log filtering, correlation IDs, and log aggregation."
-        })
-
+            "impact": "Allows production log filtering, correlation IDs, and log aggregation."})
     if re.search(r"global\s+\w+", function_code):
-        recommendations.append({
-            "dimension": "Coupling & Purity",
+        recommendations.append({"dimension": "Coupling & Purity",
             "action": "Eliminate global state mutation; pass required state explicitly as function parameters.",
-            "impact": "Eliminates race conditions and makes unit testing trivial."
-        })
-
+            "impact": "Eliminates race conditions and makes unit testing trivial."})
     if not recommendations:
-        recommendations.append({
-            "dimension": "General Architecture",
+        recommendations.append({"dimension": "General Architecture",
             "action": "Code adheres to high baseline standards. Ensure unit tests cover boundary values.",
-            "impact": "Maintains production readiness."
-        })
-
+            "impact": "Maintains production readiness."})
     return {
         "target_goal": goal,
         "recommendation_count": len(recommendations),
@@ -304,13 +318,7 @@ def codeweaver_refactor_adviser(function_code: str, goal: str = "production_hard
 
 @mcp.tool()
 def codeweaver_test_scaffold(func_name: str, args_spec: str, expected_behavior: str) -> str:
-    """Generates a comprehensive pytest unit test scaffold covering happy paths, edge cases, and exceptions.
-    
-    Args:
-        func_name: Name of the function under test (e.g., 'calculate_velocity').
-        args_spec: Parameter list (e.g., 'mass: float, acceleration: float').
-        expected_behavior: Expected behavior or formula summary.
-    """
+    """Generates a comprehensive pytest unit test scaffold."""
     return f'''import pytest
 
 # ── Tests for {func_name} ──────────────────────────────────────────────────
@@ -349,17 +357,10 @@ def test_{func_name}_deterministic_invariance():
 
 @mcp.tool()
 def codeweaver_diff_linter(diff_text: str) -> Dict[str, Any]:
-    """Validates a unified diff for header syntax, balanced hunk counts, and common diff errors.
-    
-    Args:
-        diff_text: Unified diff block (starting with @@ or ---/+++).
-    """
+    """Validates a unified diff for header syntax, balanced hunk counts, and common diff errors."""
     lines = diff_text.strip().splitlines()
-    hunks = 0
-    additions = 0
-    deletions = 0
+    hunks = additions = deletions = 0
     errors = []
-
     for idx, line in enumerate(lines, start=1):
         if line.startswith("@@"):
             hunks += 1
@@ -369,7 +370,6 @@ def codeweaver_diff_linter(diff_text: str) -> Dict[str, Any]:
             additions += 1
         elif line.startswith("-") and not line.startswith("---"):
             deletions += 1
-
     return {
         "valid_diff": len(errors) == 0,
         "hunk_count": hunks,
@@ -377,6 +377,97 @@ def codeweaver_diff_linter(diff_text: str) -> Dict[str, Any]:
         "deletions": deletions,
         "errors": errors,
     }
+
+
+# ─── 6. FIX-IT SCAFFOLD GENERATOR ───────────────────────────────────────────
+
+@mcp.tool()
+def codeweaver_fix_scaffold(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Generates a fix-it scaffold from security scan findings (CWE -> remediation stubs)."""
+    fixes = []
+    for f in findings:
+        fixes.append({
+            "rule_id": f.get("rule_id"),
+            "line_number": f.get("line_number"),
+            "severity": f.get("severity"),
+            "remediation": f.get("remediation"),
+            "stub": f"# TODO: fix {f.get('rule_id')} at line {f.get('line_number')}: {f.get('remediation')}",
+        })
+    return {
+        "fix_count": len(fixes),
+        "fixes": fixes,
+        "note": "Apply fixes in order of severity (CRITICAL first). Re-run codeweaver_security_scan to verify.",
+    }
+
+
+# ─── 7. FULL PIPELINE (scan + complexity + deps + predator-style) ───────────
+
+@mcp.tool()
+def codeweaver_full_pipeline(code_or_file_path: str, persist: bool = True) -> Dict[str, Any]:
+    """Runs AST inspect + security scan + dependency audit + complexity gate in one pipeline."""
+    inspect = codeweaver_ast_inspect(code_or_file_path)
+    scan = codeweaver_security_scan(code_or_file_path)
+    deps = codeweaver_dependency_audit(code_or_file_path)
+    gate = codeweaver_complexity_gate(code_or_file_path)
+
+    session_id = f"code-{int(time.time())}"
+    result = {
+        "status": "PIPELINE_COMPLETE",
+        "session_id": session_id,
+        "ast": inspect,
+        "security": scan,
+        "dependencies": deps,
+        "complexity_gate": gate,
+        "overall": "PASS" if (scan.get("status") == "PASS" and gate.get("status") == "PASS" and deps.get("status") == "PASS") else "REVIEW",
+        "timestamp": time.time(),
+    }
+
+    if persist:
+        try:
+            p = SESSION_DIR / f"{session_id}.json"
+            p.write_text(json.dumps({"type": "full_pipeline", "result": result}, indent=2), encoding="utf-8")
+            result["persisted_to"] = str(p)
+        except Exception as e:
+            result["persist_error"] = str(e)
+
+    return result
+
+
+# ─── 8. SESSION PERSISTENCE / REPLAY ─────────────────────────────────────────
+
+@mcp.tool()
+def codeweaver_session_list() -> Dict[str, Any]:
+    """List persisted code sessions."""
+    sessions = []
+    for p in sorted(SESSION_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            r = data.get("result", {})
+            sessions.append({
+                "session_id": r.get("session_id"),
+                "type": data.get("type"),
+                "overall": r.get("overall"),
+                "timestamp": r.get("timestamp"),
+                "file": str(p),
+            })
+        except Exception:
+            continue
+    return {"count": len(sessions), "sessions": sessions}
+
+
+@mcp.tool()
+def codeweaver_session_replay(session_id: str) -> Dict[str, Any]:
+    """Replay a persisted code session by ID."""
+    path = SESSION_DIR / f"{session_id}.json"
+    if not path.exists():
+        matches = list(SESSION_DIR.glob(f"{session_id}*.json"))
+        if not matches:
+            return {"error": f"Session not found: {session_id}"}
+        path = matches[0]
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": f"Failed to read session: {e}"}
 
 
 if __name__ == "__main__":
