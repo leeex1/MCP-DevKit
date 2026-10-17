@@ -23,6 +23,7 @@ if sys.platform == "win32":
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import hashlib
+import json
 import re
 import time
 from fastmcp import FastMCP
@@ -667,6 +668,140 @@ def fallacy_scan(argument: str) -> Dict[str, Any]:
 def reasoning_modes_list() -> Dict[str, Any]:
     """List all implemented reasoning modes + critical phases + fallacy coverage."""
     return {"modes": sorted(REASONING_MODES.keys()) + ["auto"], "critical_phases": CRITICAL_PHASES, "quick_presets": {"quick": ["restate", "hypotheses", "synthesis"], "standard": ["restate", "decompose", "adversarial", "synthesis"], "deep": CRITICAL_PHASES, "research": ["restate", "decompose", "hypotheses", "evidence", "synthesis"]}, "fallacies_covered": FALLACIES, "spec": {k: {"skill": v["skill"], "council": v["council"]} for k, v in REASONING_MODES.items()}}
+
+
+# ─── THINKING TRACE EXPOSURE ─────────────────────────────────────────────────
+# Exposes structured thinking traces the model can consume and reason with.
+
+TRACE_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_thinking_engine\traces")
+TRACE_DIR.mkdir(parents=True, exist_ok=True)
+
+TRACE_PHASES = {
+    "restate": "Restate the problem in your own words. What is actually being asked? What would failure look like?",
+    "decompose": "Break into A/B/C sub-problems and their dependencies. What are the load-bearing assumptions?",
+    "hypotheses": "Generate H1 (obvious), H2 (contrarian), H3 (edge case), H4 (synthesis candidate).",
+    "adversarial": "Steelman the opposite: what must be true for H1 to be WRONG? Attack the weakest assumption.",
+    "evidence": "Grade evidence A/B/C/D/F. What is the key uncertainty that could flip the conclusion?",
+    "edge_sweep": "Sweep edge cases: null/empty, adversarial input, scale n=1000, off-by-one.",
+    "synthesis": "Produce H* (final hypothesis) + evidence grade + caveat + confidence%.",
+}
+
+TRACE_PRESETS = {
+    "quick": ["restate", "hypotheses", "synthesis"],
+    "standard": ["restate", "decompose", "adversarial", "synthesis"],
+    "deep": ["restate", "decompose", "hypotheses", "adversarial", "evidence", "edge_sweep", "synthesis"],
+    "research": ["restate", "decompose", "hypotheses", "evidence", "synthesis"],
+}
+
+
+@mcp.tool()
+def thinking_trace(query: str, depth: str = "deep") -> Dict[str, Any]:
+    """Produce a structured, consumable thinking trace for a query.
+
+    Returns ordered reasoning phases with prompts, so the model can reason
+    step-by-step using the Quillan thinking engine. Each phase is a thinking
+    step the model should fill in.
+    """
+    phases_wanted = TRACE_PRESETS.get(depth.strip().lower(), TRACE_PRESETS["deep"])
+    if depth.strip().lower() == "all":
+        phases_wanted = list(TRACE_PHASES.keys())
+
+    trace = []
+    for i, ph in enumerate(phases_wanted, start=1):
+        trace.append({
+            "step": i,
+            "phase": ph,
+            "prompt": TRACE_PHASES[ph],
+            "query_context": query[:200],
+            "status": "PENDING_MODEL_FILL",
+        })
+
+    # Always include adversarial if not present and consequential
+    if "adversarial" not in phases_wanted:
+        trace.append({
+            "step": len(trace) + 1,
+            "phase": "adversarial",
+            "prompt": TRACE_PHASES["adversarial"],
+            "query_context": query[:200],
+            "status": "SKIPPED_WARNING",
+            "note": "NEVER skip adversarial on consequential outputs.",
+        })
+
+    trace_id = f"trace-{int(time.time())}"
+    result = {
+        "trace_id": trace_id,
+        "query": query,
+        "depth": depth,
+        "phases": trace,
+        "phase_count": len(trace),
+        "council": ["C7-LOGOS", "C17-NULLION", "C18-SHEPHERD"],
+        "gate": "adversarial required; confidence 90/70/50 bands",
+        "usage": "Fill each phase's reasoning, then synthesize final answer. Persist via thinking_trace_save if needed.",
+    }
+
+    # persist
+    try:
+        p = TRACE_DIR / f"{trace_id}.json"
+        p.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        result["persisted_to"] = str(p)
+    except Exception as e:
+        result["persist_error"] = str(e)
+
+    return result
+
+
+@mcp.tool()
+def thinking_trace_save(trace_id: str, filled_phases: List[Dict[str, Any]],
+                       final_answer: Optional[str] = None) -> Dict[str, Any]:
+    """Save a filled thinking trace (model's reasoning) for audit/replay."""
+    path = TRACE_DIR / f"{trace_id}.json"
+    if not path.exists():
+        return {"error": f"Trace not found: {trace_id}"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": f"Read failed: {e}"}
+    data["filled_phases"] = filled_phases
+    if final_answer:
+        data["final_answer"] = final_answer
+    data["status"] = "FILLED"
+    data["filled_at"] = time.time()
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"status": "SAVED", "trace_id": trace_id, "path": str(path)}
+
+
+@mcp.tool()
+def thinking_trace_list() -> Dict[str, Any]:
+    """List persisted thinking traces."""
+    traces = []
+    for p in sorted(TRACE_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            traces.append({
+                "trace_id": data.get("trace_id"),
+                "query": (data.get("query") or "")[:80],
+                "depth": data.get("depth"),
+                "status": data.get("status", "PENDING_MODEL_FILL"),
+                "timestamp": p.stat().st_mtime,
+            })
+        except Exception:
+            continue
+    return {"count": len(traces), "traces": traces}
+
+
+@mcp.tool()
+def thinking_trace_replay(trace_id: str) -> Dict[str, Any]:
+    """Replay a persisted thinking trace by ID."""
+    path = TRACE_DIR / f"{trace_id}.json"
+    if not path.exists():
+        matches = list(TRACE_DIR.glob(f"{trace_id}*.json"))
+        if not matches:
+            return {"error": f"Trace not found: {trace_id}"}
+        path = matches[0]
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": f"Read failed: {e}"}
 
 
 if __name__ == "__main__":
