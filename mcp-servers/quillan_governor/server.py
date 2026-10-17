@@ -2,18 +2,24 @@
 # -*- coding: utf-8 -*-
 """
 ⚡ QUILLAN-RONIN GOVERNOR ENGINE — NATIVE FAST-MCP SERVER
-==========================================================
-Embodying C14-KAIDO, C26-TECHNE, and the LeeMach6 Velocity Governor:
+=========================================================
+Embodying C14-KAIDO (Efficiency), C26-TECHNE, and the LeeMach6 Velocity Governor:
   1. governor_system_telemetry: Real-time host CPU, RAM, Swap, and DPC health check
   2. governor_thread_budget: Safe CPU thread budget (reserves 2 cores for Windows OS/DWM)
   3. governor_optimizer_ram_calc: Mathematical RAM estimator (AdamW vs Muon vs SGD)
   4. governor_velocity_tune: LeeMach6 step-time velocity and thermal throttle tuner
+  5. governor_full_pipeline — telemetry -> thread budget -> ram calc -> velocity tune -> health summary (persisted)
+  6. governor_route — cross-MCP routing payload (council/code/buddy)
+  7. governor_health — governor dashboard summary
+  8. governor_session_list / governor_session_replay — persistence
 """
 
 import sys
 import os
 import math
 import json
+import time
+import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -26,22 +32,20 @@ from fastmcp import FastMCP
 
 mcp = FastMCP("QuillanGovernor")
 
+SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_governor\sessions")
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─── 1. SYSTEM TELEMETRY & HEALTH CHECK ──────────────────────────────────────
 
 @mcp.tool()
 def governor_system_telemetry() -> Dict[str, Any]:
-    """Inspects live host system telemetry to ensure compute workloads don't freeze the desktop.
-    
-    Checks CPU load, available RAM, swap usage, and flags hazardous resource starvation states.
-    """
+    """Inspects live host system telemetry to ensure compute workloads don't freeze the desktop."""
     vm = psutil.virtual_memory()
     swap = psutil.swap_memory()
     cpu_percent = psutil.cpu_percent(interval=0.2)
     logical_cores = os.cpu_count() or 1
     physical_cores = psutil.cpu_count(logical=False) or logical_cores // 2
 
-    # Status classification
     free_ram_gb = round(vm.available / (1024**3), 2)
     total_ram_gb = round(vm.total / (1024**3), 2)
     used_ram_pct = vm.percent
@@ -78,18 +82,11 @@ def governor_system_telemetry() -> Dict[str, Any]:
         }
     }
 
-
 # ─── 2. THREAD BUDGET & PRIORITY ADVISOR ─────────────────────────────────────
 
 @mcp.tool()
 def governor_thread_budget(workload_type: str = "training") -> Dict[str, Any]:
-    """Calculates the exact safe CPU thread allocation and process priority.
-    
-    Reserves at least 2 cores to prevent Windows kernel DPC/ISR starvation and mouse compositor freezing.
-    
-    Args:
-        workload_type: Type of task: 'training', 'inference', 'data_loading', or 'background'.
-    """
+    """Calculates the exact safe CPU thread allocation and process priority."""
     total_cores = os.cpu_count() or 4
     wl = workload_type.strip().lower()
 
@@ -130,7 +127,6 @@ def governor_thread_budget(workload_type: str = "training") -> Dict[str, Any]:
         "python_setup_snippet": code_snippet
     }
 
-
 # ─── 3. OPTIMIZER RAM ESTIMATOR ──────────────────────────────────────────────
 
 @mcp.tool()
@@ -143,44 +139,23 @@ def governor_optimizer_ram_calc(
     hidden_dim: int = 1024,
     n_layers: int = 12
 ) -> Dict[str, Any]:
-    """Accurately calculates memory footprint (RAM) for model training.
-    
-    Compares model weights, gradients, optimizer states (AdamW vs Muon vs SGD), and activations.
-    
-    Args:
-        param_count_millions: Total model parameters in millions (e.g. 758 for 12L, 380 for 6L).
-        optimizer: 'adamw', 'muon', or 'sgd'.
-        trainable_ratio: Fraction of parameters receiving gradients (0.0 to 1.0, e.g. 0.22 for unfreezing attention/prism only).
-        batch_size: Batch size per step.
-        seq_len: Context sequence length in tokens.
-        hidden_dim: Model hidden dimension (e.g. 1024).
-        n_layers: Number of transformer layers (e.g. 6 or 12).
-    """
+    """Accurately calculates memory footprint (RAM) for model training."""
     p_total = param_count_millions * 1e6
     p_trainable = p_total * max(0.01, min(1.0, trainable_ratio))
 
-    # Weight memory (FP32 baseline in bytes)
     weight_bytes = p_total * 4
-
-    # Gradient memory (FP32 for trainable parameters)
     grad_bytes = p_trainable * 4
 
-    # Optimizer states
     opt = optimizer.strip().lower()
     if opt == "adamw":
-        # 1st moment (fp32) + 2nd moment (fp32) = 8 bytes per trainable param
         opt_bytes = p_trainable * 8
     elif opt == "muon":
-        # Single momentum buffer = 4 bytes per trainable param
         opt_bytes = p_trainable * 4
     elif opt == "sgd":
-        # Momentum buffer = 4 bytes, or 0 without momentum
         opt_bytes = p_trainable * 4
     else:
         opt_bytes = p_trainable * 8
 
-    # Activation memory estimation (bytes)
-    # Roughly 2 * b * s * h * l * (attention + ffn overhead)
     act_bytes = 2 * batch_size * seq_len * hidden_dim * n_layers * 4 * 3
 
     total_bytes = weight_bytes + grad_bytes + opt_bytes + act_bytes
@@ -206,7 +181,6 @@ def governor_optimizer_ram_calc(
         "verdict": "SAFE_HEADROOM" if fits_in_ram else "EXCEEDS_RECOMMENDED_HEADROOM (Risk of Paging/Freezing)"
     }
 
-
 # ─── 4. LEEMACH6 VELOCITY TUNING ─────────────────────────────────────────────
 
 @mcp.tool()
@@ -215,15 +189,7 @@ def governor_velocity_tune(
     target_step_time_ms: float = 5000.0,
     current_loss: Optional[float] = None
 ) -> Dict[str, Any]:
-    """Applies the LeeMach6 Velocity Governor algorithm to tune training throughput.
-    
-    Provides PID adjustments to maintain stable step cadence without thermal or memory runaway.
-    
-    Args:
-        current_step_time_ms: Measured time for the last training step in milliseconds.
-        target_step_time_ms: Desired step cadence (default 5000ms / 5s).
-        current_loss: Optional current loss value to correlate with step stability.
-    """
+    """Applies the LeeMach6 Velocity Governor algorithm to tune training throughput."""
     error = target_step_time_ms - current_step_time_ms
     velocity_ratio = current_step_time_ms / max(100.0, target_step_time_ms)
 
@@ -246,6 +212,122 @@ def governor_velocity_tune(
         "prescribed_actions": actions
     }
 
+# ─── 5. FULL PIPELINE (persisted) ────────────────────────────────────────────
+
+@mcp.tool()
+def governor_full_pipeline(param_count_millions: float = 758.0, optimizer: str = "adamw",
+                          trainable_ratio: float = 1.0, batch_size: int = 1, seq_len: int = 512,
+                          hidden_dim: int = 1024, n_layers: int = 12,
+                          workload_type: str = "training",
+                          current_step_time_ms: float = 4200.0, target_step_time_ms: float = 5000.0,
+                          persist: bool = True) -> Dict[str, Any]:
+    """Chain telemetry -> thread budget -> ram calc -> velocity tune -> health summary."""
+    telemetry = governor_system_telemetry()
+    budget = governor_thread_budget(workload_type=workload_type)
+    ram = governor_optimizer_ram_calc(param_count_millions=param_count_millions, optimizer=optimizer,
+                                     trainable_ratio=trainable_ratio, batch_size=batch_size,
+                                     seq_len=seq_len, hidden_dim=hidden_dim, n_layers=n_layers)
+    velocity = governor_velocity_tune(current_step_time_ms=current_step_time_ms,
+                                     target_step_time_ms=target_step_time_ms)
+
+    session_id = f"governor-{int(time.time())}"
+    result = {
+        "status": "GOVERNOR_PIPELINE_COMPLETE",
+        "session_id": session_id,
+        "telemetry": telemetry,
+        "thread_budget": budget,
+        "ram_calc": ram,
+        "velocity_tune": velocity,
+        "overall": "PASS" if (telemetry.get("status") not in ("CRITICAL_STARVATION",) and ram.get("safe_to_run") and velocity.get("status") == "STABLE") else "REVIEW",
+        "timestamp": time.time(),
+    }
+
+    if persist:
+        try:
+            p = SESSION_DIR / f"{session_id}.json"
+            p.write_text(json.dumps({"type": "governor_pipeline", "result": result}, indent=2), encoding="utf-8")
+            result["persisted_to"] = str(p)
+        except Exception as e:
+            result["persist_error"] = str(e)
+
+    return result
+
+# ─── 7. ROUTE (cross-MCP) ───────────────────────────────────────────────────
+
+@mcp.tool()
+def governor_route(target_mcp: str = "council", payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Cross-MCP routing payload for council/code/buddy integration."""
+    if target_mcp.lower() == "council":
+        return {"target": "QuillanCouncil", "suggested_tool": "council_full_deliberation",
+                "payload": payload or {}, "note": "Route governor resource decision to council deliberation."}
+    if target_mcp.lower() == "code":
+        return {"target": "QuillanCode", "suggested_tool": "codeweaver_full_pipeline",
+                "payload": payload or {}, "note": "Route governor infrastructure setup to code scan pipeline."}
+    if target_mcp.lower() == "buddy":
+        return {"target": "RoninBuddy", "suggested_tool": "buddy_mirror_collaborate",
+                "payload": payload or {}, "note": "Route governor tuning to mirror-collaboration."}
+    return {"error": f"Unknown target '{target_mcp}'. Use council, code, or buddy."}
+
+# ─── 8. HEALTH DASHBOARD ────────────────────────────────────────────────────
+
+@mcp.tool()
+def governor_health() -> Dict[str, Any]:
+    """Governor dashboard summary (telemetry + budget + ram + velocity)."""
+    sessions = []
+    try:
+        for p in sorted(SESSION_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                sessions.append({
+                    "session_id": data.get("session_id"),
+                    "telemetry_status": (data.get("telemetry") or {}).get("status"),
+                    "ram_safe": (data.get("ram_calc") or {}).get("safe_to_run"),
+                    "velocity_status": (data.get("velocity_tune") or {}).get("status"),
+                    "overall": data.get("overall"),
+                    "timestamp": data.get("timestamp"),
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {
+        "status": "GOVERNOR_HEALTH_READY",
+        "sessions": sessions[:5],
+        "council_note": "C14-KAIDO optimizes; C26-TECHNE engineers; LeeMach6 paces.",
+    }
+
+# ─── 9. SESSION PERSISTENCE ─────────────────────────────────────────────────
+
+@mcp.tool()
+def governor_session_list() -> Dict[str, Any]:
+    """List persisted governor sessions."""
+    sessions = []
+    for p in sorted(SESSION_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            sessions.append({
+                "session_id": data.get("session_id"),
+                "overall": data.get("overall"),
+                "timestamp": data.get("timestamp"),
+                "file": str(p),
+            })
+        except Exception:
+            continue
+    return {"count": len(sessions), "sessions": sessions}
+
+@mcp.tool()
+def governor_session_replay(session_id: str) -> Dict[str, Any]:
+    """Replay a persisted governor session by ID."""
+    path = SESSION_DIR / f"{session_id}.json"
+    if not path.exists():
+        matches = list(SESSION_DIR.glob(f"{session_id}*.json"))
+        if not matches:
+            return {"error": f"Session not found: {session_id}"}
+        path = matches[0]
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": f"Read failed: {e}"}
 
 if __name__ == "__main__":
     mcp.run()

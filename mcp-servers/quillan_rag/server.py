@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Quillan RAG MCP Server - NIM-Powered Enterprise RAG
 ====================================================
 Embedding: nvidia/nemotron-3-embed-1b (2048 dims, confirmed working)
 Generator: nvidia/nemotron-3-super-120b-a12b
 Storage:   ChromaDB (local persistent)
+
+Added:
+  5. rag_full_pipeline — ingest folder -> search -> ask -> kb_stats (persisted)
+  6. rag_route — cross-MCP routing payload (council/code/buddy)
+  7. rag_health — knowledge base dashboard summary
+  8. rag_session_list / rag_session_replay — persistence
 """
 
 import os, json, logging, hashlib, asyncio
@@ -18,7 +25,6 @@ def _get_api_key() -> str:
     key = os.environ.get("NVIDIA_API_KEY", "")
     if key:
         return key.strip()
-    # Check Windows User Environment if on Windows
     if os.name == "nt":
         try:
             import winreg
@@ -28,7 +34,6 @@ def _get_api_key() -> str:
                     return str(val).strip()
         except Exception:
             pass
-    # Check local .env if present (gitignored)
     env_file = Path(r"C:\02_QUILLAN\.env")
     if env_file.exists():
         try:
@@ -101,7 +106,7 @@ async def _generate(system: str, user: str, max_tokens: int = 1024, max_retries:
             r = await client.post(f"{NIM_BASE}/chat/completions",
                 headers={"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"},
                 json={"model": GEN_MODEL, "messages": [{"role": "system", "content": system},
-                      {"role": "user", "content": user}], "max_tokens": max_tokens, "temperature": 0.2},
+                {"role": "user", "content": user}], "max_tokens": max_tokens, "temperature": 0.2},
                 timeout=60.0)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
@@ -246,6 +251,125 @@ async def delete_source(filename: str) -> str:
     if not ids: return f"No chunks found for '{filename}'"
     _col.delete(ids=ids)
     return f"🗑️ Removed {len(ids)} chunks for '{filename}'"
+
+# ── 5. FULL PIPELINE (persisted) ──────────────────────────────────────────────
+
+@mcp.tool()
+async def rag_full_pipeline(folder_path: str = "", question: str = "", n_context: int = 5,
+                           extensions: Optional[list[str]] = None,
+                           persist: bool = True) -> Dict[str, Any]:
+    """Chain ingest folder -> search -> ask -> kb_stats into one RAG pipeline."""
+    ingest_result = await ingest_folder(folder_path, extensions=extensions) if folder_path else {"skipped": True}
+    search_result = await search(query=question, n_results=n_context) if question else {"skipped": True}
+    ask_result = await ask(question=question, n_context=n_context) if question else {"skipped": True}
+    stats_result = kb_stats()
+
+    session_id = f"rag-{int(time.time())}"
+    result = {
+        "status": "RAG_PIPELINE_COMPLETE",
+        "session_id": session_id,
+        "ingest": ingest_result,
+        "search": search_result,
+        "ask": ask_result,
+        "stats": stats_result,
+        "overall": "PASS" if (not ingest_result.get("skipped") or not search_result.get("skipped")) else "REVIEW",
+        "timestamp": time.time(),
+    }
+
+    if persist:
+        try:
+            p = SESSION_DIR / f"{session_id}.json"
+            p.write_text(json.dumps({"type": "rag_pipeline", "result": result}, indent=2), encoding="utf-8")
+            result["persisted_to"] = str(p)
+        except Exception as e:
+            result["persist_error"] = str(e)
+
+    return result
+
+# ── 6. ROUTE (cross-MCP) ───────────────────────────────────────────────────
+
+@mcp.tool()
+def rag_route(target_mcp: str = "council", payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Cross-MCP routing payload for council/code/buddy integration."""
+    if target_mcp.lower() == "council":
+        return {"target": "QuillanCouncil", "suggested_tool": "council_full_deliberation",
+                "payload": payload or {}, "note": "Route RAG findings to council deliberation."}
+    if target_mcp.lower() == "code":
+        return {"target": "QuillanCode", "suggested_tool": "codeweaver_full_pipeline",
+                "payload": payload or {}, "note": "Route RAG code docs to code scan pipeline."}
+    if target_mcp.lower() == "buddy":
+        return {"target": "RoninBuddy", "suggested_tool": "buddy_mirror_collaborate",
+                "payload": payload or {}, "note": "Route RAG answer to mirror-collaboration."}
+    return {"error": f"Unknown target '{target_mcp}'. Use council, code, or buddy."}
+
+# ── 7. HEALTH DASHBOARD ──────────────────────────────────────────────────────
+
+@mcp.tool()
+def rag_health() -> Dict[str, Any]:
+    """Knowledge base dashboard summary."""
+    count = _col.count()
+    sessions = []
+    try:
+        from pathlib import Path as _P
+        session_dir = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_rag\sessions")
+        session_dir.mkdir(parents=True, exist_ok=True)
+        for p in sorted(session_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                sessions.append({
+                    "session_id": data.get("session_id"),
+                    "overall": data.get("overall"),
+                    "timestamp": data.get("timestamp"),
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {
+        "status": "RAG_HEALTH_READY",
+        "kb_chunks": count,
+        "embedding_model": EMBED_MODEL,
+        "generator_model": GEN_MODEL,
+        "db_path": str(CHROMA_PATH),
+        "sessions": sessions[:5],
+        "council_note": "C6-OMNIS integrates knowledge; C18-SHEPHERD grounds truth.",
+    }
+
+# ── 8. SESSION PERSISTENCE ──────────────────────────────────────────────────
+
+SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_rag\sessions")
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+@mcp.tool()
+async def rag_session_list() -> Dict[str, Any]:
+    """List persisted RAG sessions."""
+    sessions = []
+    for p in sorted(SESSION_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            sessions.append({
+                "session_id": data.get("session_id"),
+                "overall": data.get("overall"),
+                "timestamp": data.get("timestamp"),
+                "file": str(p),
+            })
+        except Exception:
+            continue
+    return {"count": len(sessions), "sessions": sessions}
+
+@mcp.tool()
+async def rag_session_replay(session_id: str) -> Dict[str, Any]:
+    """Replay a persisted RAG session by ID."""
+    path = SESSION_DIR / f"{session_id}.json"
+    if not path.exists():
+        matches = list(SESSION_DIR.glob(f"{session_id}*.json"))
+        if not matches:
+            return {"error": f"Session not found: {session_id}"}
+        path = matches[0]
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": f"Read failed: {e}"}
 
 if __name__ == "__main__":
     log.info(f"Quillan RAG | embed={EMBED_MODEL} | gen={GEN_MODEL} | db={CHROMA_PATH}")

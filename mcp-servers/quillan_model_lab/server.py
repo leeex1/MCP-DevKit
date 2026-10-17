@@ -2,18 +2,24 @@
 # -*- coding: utf-8 -*-
 """
 🔬 QUILLAN-RONIN MODEL LAB & DIAGNOSTICS — NATIVE FAST-MCP SERVER
-==================================================================
+================================================================
 Embodying C28-CALCULUS, C6-OMNIS, and Optimization Specialist:
   1. Checkpoint Header & Parameter Inspection (fast header read without loading all tensors)
   2. Dataset Validator & Distribution Profiler (JSONL token distribution, length percentiles)
   3. Hardware & Memory Footprint Advisor (RAM headroom, thread limits, zero-lag tuning)
   4. BitNet Ternary Quantization & Sparsity Analyzer
+  5. model_lab_full_pipeline — inspect checkpoint -> validate dataset -> hardware advisor -> quantization analyzer (persisted)
+  6. model_lab_route — cross-MCP routing payload (council/code/buddy)
+  7. model_lab_health — model lab dashboard summary
+  8. model_lab_session_list / model_lab_session_replay — persistence
 """
 
 import sys
 import os
 import math
 import json
+import time
+import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -26,25 +32,22 @@ from fastmcp import FastMCP
 
 mcp = FastMCP("QuillanModelLab")
 
+SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_model_lab\sessions")
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─── 1. CHECKPOINT INSPECTOR ─────────────────────────────────────────────────
 
 @mcp.tool()
 def model_checkpoint_inspect(checkpoint_path: str) -> Dict[str, Any]:
-    """Inspects a PyTorch model checkpoint (.pt) without memory pressure.
-    
-    Args:
-        checkpoint_path: Path to .pt checkpoint file.
-    """
+    """Inspects a PyTorch model checkpoint (.pt) without memory pressure."""
     p = Path(checkpoint_path.strip().strip('"\''))
     if not p.exists():
         return {"error": f"Checkpoint not found: {p}"}
 
     try:
-        # Load on CPU with map_location="cpu"
         data = torch.load(p, map_location="cpu", weights_only=False)
         keys = list(data.keys())
-        
+
         info = {
             "file_name": p.name,
             "size_mb": round(p.stat().st_size / (1024 * 1024), 2),
@@ -79,17 +82,11 @@ def model_checkpoint_inspect(checkpoint_path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"Failed to inspect checkpoint: {e}"}
 
-
 # ─── 2. DATASET VALIDATOR & PROFILER ─────────────────────────────────────────
 
 @mcp.tool()
 def model_dataset_validator(jsonl_path: str, max_samples: int = 1000) -> Dict[str, Any]:
-    """Validates and profiles a JSONL training dataset for question/response coverage, char lengths, and formatting.
-    
-    Args:
-        jsonl_path: Absolute path to JSONL file.
-        max_samples: Number of samples to inspect.
-    """
+    """Validates and profiles a JSONL training dataset for question/response coverage, char lengths, and formatting."""
     p = Path(jsonl_path.strip().strip('"\''))
     if not p.exists():
         return {"error": f"Dataset file not found: {p}"}
@@ -113,7 +110,7 @@ def model_dataset_validator(jsonl_path: str, max_samples: int = 1000) -> Dict[st
                     obj = json.loads(line)
                     prompt = obj.get("question") or obj.get("prompt") or obj.get("instruction") or ""
                     resp = obj.get("response") or obj.get("answer") or obj.get("output") or ""
-                    
+
                     if not resp.strip():
                         empty_responses += 1
                         continue
@@ -142,25 +139,18 @@ def model_dataset_validator(jsonl_path: str, max_samples: int = 1000) -> Dict[st
     except Exception as e:
         return {"error": f"Failed to validate dataset: {e}"}
 
-
 # ─── 3. HARDWARE & ZERO-LAG FOOTPRINT ADVISOR ────────────────────────────────
 
 @mcp.tool()
 def model_hardware_advisor(model_param_millions: float = 758.0) -> Dict[str, Any]:
-    """Calculates safe memory allocations and thread caps to guarantee 0% desktop stutter.
-    
-    Args:
-        model_param_millions: Parameter count in millions (e.g., 758.0 for 6L, 1050.0 for 12L).
-    """
+    """Calculates safe memory allocations and thread caps to guarantee 0% desktop stutter."""
     total_cores = os.cpu_count() or 4
     safe_threads = max(1, total_cores - 2)
 
-    # Memory modeling (in GB)
     fp32_weights_gb = round((model_param_millions * 1e6 * 4) / (1024**3), 2)
     adamw_state_gb = round(fp32_weights_gb * 2, 2)
     full_unfreeze_total_gb = round(fp32_weights_gb + adamw_state_gb + 1.0, 2)
 
-    # Targeted unfreeze (Attention + LoRA + Gates ~110M params)
     targeted_params_m = min(110.0, model_param_millions)
     targeted_weights_gb = round((targeted_params_m * 1e6 * 4) / (1024**3), 2)
     targeted_adamw_gb = round(targeted_weights_gb * 2, 2)
@@ -179,6 +169,170 @@ def model_hardware_advisor(model_param_millions: float = 758.0) -> Dict[str, Any
         )
     }
 
+# ─── 4. BITNET TERNARY QUANTIZATION ANALYZER ─────────────────────────────────
+
+@mcp.tool()
+def model_bitnet_analyze(checkpoint_path: str) -> Dict[str, Any]:
+    """Analyzes a checkpoint for BitNet 1.58-bit ternary quantization viability."""
+    p = Path(checkpoint_path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"Checkpoint not found: {p}"}
+
+    try:
+        data = torch.load(p, map_location="cpu", weights_only=False)
+        sd = data.get("model_state_dict", data if isinstance(data, dict) else {})
+
+        total_params = 0
+        ternary_eligible = 0
+        weight_layers = []
+
+        for name, t in sd.items():
+            n = t.numel()
+            total_params += n
+            if t.is_floating_point():
+                weight_layers.append({"name": name, "params": n, "dtype": str(t.dtype)})
+                if t.dim() >= 2:
+                    ternary_eligible += n
+
+        total_m = total_params / 1e6
+        ternary_m = ternary_eligible / 1e6
+
+        # BitNet 1.58b: ternary {-1,0,1} + per-channel scale gamma
+        # Memory: 1 bit for sign + 1 bit for zero + scale
+        ternary_bits_per_param = 2  # {-1,0,1} ~ 2 bits after packing with scale
+        compressed_gb = round((ternary_m * 1e6 * 2 / 8) / (1024**3), 2)
+        full_fp32_gb = round((total_m * 1e6 * 4) / (1024**3), 2)
+        savings = round((1 - compressed_gb / max(full_fp32_gb, 0.001)) * 100, 1)
+
+        return {
+            "file_name": p.name,
+            "total_parameters_m": round(total_m, 2),
+            "ternary_eligible_parameters_m": round(ternary_m, 2),
+            "ternary_eligible_pct": round((ternary_m / max(total_m, 0.001)) * 100, 1),
+            "full_fp32_gb": full_fp32_gb,
+            "ternary_compressed_gb": compressed_gb,
+            "memory_savings_pct": savings,
+            "weight_layers_sample": weight_layers[:10],
+            "recommendation": (
+                f"BitNet 1.58b viable: {ternary_m:.1f}M of {total_m:.1f}M params ternary-eligible "
+                f"({(ternary_m / max(total_m, 0.001)) * 100:.1f}%). Estimated {savings}% memory reduction."
+            ),
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to analyze checkpoint: {e}"}
+
+# ─── 5. FULL PIPELINE (persisted) ───────────────────────────────────────────
+
+@mcp.tool()
+def model_lab_full_pipeline(checkpoint_path: str = "", jsonl_path: str = "",
+                           model_param_millions: float = 758.0,
+                           persist: bool = True) -> Dict[str, Any]:
+    """Chain checkpoint inspect -> dataset validate -> hardware advisor -> bitnet analyzer."""
+    ckpt = model_checkpoint_inspect(checkpoint_path) if checkpoint_path else {"skipped": True}
+    dataset = model_dataset_validator(jsonl_path) if jsonl_path else {"skipped": True}
+    hardware = model_hardware_advisor(model_param_millions=model_param_millions)
+    bitnet = model_bitnet_analyze(checkpoint_path) if checkpoint_path else {"skipped": True}
+
+    session_id = f"modellab-{int(time.time())}"
+    result = {
+        "status": "MODEL_LAB_PIPELINE_COMPLETE",
+        "session_id": session_id,
+        "checkpoint": ckpt,
+        "dataset": dataset,
+        "hardware": hardware,
+        "bitnet": bitnet,
+        "overall": "PASS" if (ckpt.get("status") != "error" and dataset.get("status") in ("HEALTHY", "WARNING_EMPTY_RESPONSES", "skipped")) else "REVIEW",
+        "timestamp": time.time(),
+    }
+
+    if persist:
+        try:
+            p = SESSION_DIR / f"{session_id}.json"
+            p.write_text(json.dumps({"type": "model_lab_pipeline", "result": result}, indent=2), encoding="utf-8")
+            result["persisted_to"] = str(p)
+        except Exception as e:
+            result["persist_error"] = str(e)
+
+    return result
+
+# ─── 6. ROUTE (cross-MCP) ───────────────────────────────────────────────────
+
+@mcp.tool()
+def model_lab_route(target_mcp: str = "council", payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Cross-MCP routing payload for council/code/buddy integration."""
+    if target_mcp.lower() == "council":
+        return {"target": "QuillanCouncil", "suggested_tool": "council_full_deliberation",
+                "payload": payload or {}, "note": "Route model lab diagnostics to council deliberation."}
+    if target_mcp.lower() == "code":
+        return {"target": "QuillanCode", "suggested_tool": "codeweaver_full_pipeline",
+                "payload": payload or {}, "note": "Route model lab findings to code scan pipeline."}
+    if target_mcp.lower() == "buddy":
+        return {"target": "RoninBuddy", "suggested_tool": "buddy_mirror_collaborate",
+                "payload": payload or {}, "note": "Route model lab results to mirror-collaboration."}
+    return {"error": f"Unknown target '{target_mcp}'. Use council, code, or buddy."}
+
+# ─── 7. HEALTH DASHBOARD ────────────────────────────────────────────────────
+
+@mcp.tool()
+def model_lab_health() -> Dict[str, Any]:
+    """Model lab dashboard summary."""
+    sessions = []
+    try:
+        for p in sorted(SESSION_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                sessions.append({
+                    "session_id": data.get("session_id"),
+                    "checkpoint": (data.get("checkpoint") or {}).get("file_name"),
+                    "dataset": (data.get("dataset") or {}).get("file_name"),
+                    "overall": data.get("overall"),
+                    "timestamp": data.get("timestamp"),
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {
+        "status": "MODEL_LAB_HEALTH_READY",
+        "sessions": sessions[:5],
+        "council_note": "C28-CALCULUS quantifies; C6-OMNIS integrates.",
+    }
+
+# ─── 9. SESSION PERSISTENCE ─────────────────────────────────────────────────
+
+@mcp.tool()
+def model_lab_session_list() -> Dict[str, Any]:
+    """List persisted model lab sessions."""
+    sessions = []
+    for p in sorted(SESSION_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            sessions.append({
+                "session_id": data.get("session_id"),
+                "checkpoint": (data.get("checkpoint") or {}).get("file_name"),
+                "dataset": (data.get("dataset") or {}).get("file_name"),
+                "overall": data.get("overall"),
+                "timestamp": data.get("timestamp"),
+                "file": str(p),
+            })
+        except Exception:
+            continue
+    return {"count": len(sessions), "sessions": sessions}
+
+@mcp.tool()
+def model_lab_session_replay(session_id: str) -> Dict[str, Any]:
+    """Replay a persisted model lab session by ID."""
+    path = SESSION_DIR / f"{session_id}.json"
+    if not path.exists():
+        matches = list(SESSION_DIR.glob(f"{session_id}*.json"))
+        if not matches:
+            return {"error": f"Session not found: {session_id}"}
+        path = matches[0]
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": f"Read failed: {e}"}
 
 if __name__ == "__main__":
     mcp.run()
