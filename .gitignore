@@ -33,3 +33,11 @@ build/
 .vscode/
 .idea/
 .DS_Store
+
+# Credentials & secrets (never commit)
+*x_credentials*
+*credentials*
+*secret*
+*_secret*
+session_storage/
+x_session/
