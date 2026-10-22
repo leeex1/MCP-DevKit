@@ -329,6 +329,491 @@ def model_lab_session_replay(session_id: str) -> Dict[str, Any]:
         return {"error": f"Read failed: {e}"}
 
 
+# ─── 10. TENSOR INSPECTION ───────────────────────────────────────────────────
+
+@mcp.tool()
+def model_tensor_inspect(checkpoint_path: str, tensor_name: str = "", max_elements: int = 20) -> Dict[str, Any]:
+    """Inspect tensor contents, statistics, shapes, and dtypes from a checkpoint."""
+    p = Path(checkpoint_path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"Checkpoint not found: {p}"}
+    try:
+        data = torch.load(p, map_location="cpu", weights_only=False)
+        sd = data.get("model_state_dict", data if isinstance(data, dict) else {})
+        if tensor_name:
+            if tensor_name not in sd:
+                return {"error": f"Tensor '{tensor_name}' not found. Available: {list(sd.keys())[:20]}"}
+            t = sd[tensor_name]
+            return {
+                "name": tensor_name,
+                "shape": list(t.shape),
+                "dtype": str(t.dtype),
+                "device": str(t.device),
+                "numel": t.numel(),
+                "min": round(float(t.min()), 6) if t.numel() > 0 else None,
+                "max": round(float(t.max()), 6) if t.numel() > 0 else None,
+                "mean": round(float(t.mean()), 6) if t.numel() > 0 else None,
+                "std": round(float(t.std()), 6) if t.numel() > 1 else None,
+                "sample_values": t.flatten()[:max_elements].tolist() if t.numel() > 0 else [],
+                "status": "TENSOR_INSPECTED",
+            }
+        # Summary of all tensors
+        tensors = []
+        for name, t in sd.items():
+            tensors.append({"name": name, "shape": list(t.shape), "dtype": str(t.dtype), "numel": t.numel()})
+        return {"total_tensors": len(tensors), "tensors": tensors[:50], "status": "CHECKPOINT_SUMMARY"}
+    except Exception as e:
+        return {"error": f"Failed to inspect: {e}"}
+
+
+# ─── 11. TRAINING SETUP INSPECTOR ────────────────────────────────────────────
+
+@mcp.tool()
+def model_training_setup(checkpoint_path: str = "") -> Dict[str, Any]:
+    """Inspect training configuration from a checkpoint or return default Quillan training setup."""
+    setup = {
+        "optimizer": "AdamW",
+        "learning_rate": 3e-4,
+        "weight_decay": 0.01,
+        "beta1": 0.9,
+        "beta2": 0.95,
+        "eps": 1e-8,
+        "scheduler": "cosine with warmup",
+        "warmup_steps": 100,
+        "total_steps": 10000,
+        "batch_size": 1,
+        "gradient_accumulation": 8,
+        "max_grad_norm": 1.0,
+        "mixed_precision": "fp16",
+        "gradient_checkpointing": True,
+        "loss_function": "cross_entropy (ignore_index=-100)",
+        "aux_losses": ["load_balance (0.05)", "z_loss (0.001)", "entropy_bonus (0.01)", "ethics (0.05)"],
+        "e_ice_bound": True,
+        "lee_mach_6_governor": True,
+    }
+    if checkpoint_path:
+        p = Path(checkpoint_path.strip().strip('"\''))
+        if p.exists():
+            try:
+                data = torch.load(p, map_location="cpu", weights_only=False)
+                if "training_config" in data:
+                    setup.update(data["training_config"])
+                if "optimizer_state_dict" in data:
+                    setup["has_optimizer_state"] = True
+                if "epoch" in data:
+                    setup["last_epoch"] = data["epoch"]
+                if "step" in data:
+                    setup["last_step"] = data["step"]
+                if "best_val" in data:
+                    setup["best_val_loss"] = data["best_val"]
+            except Exception as e:
+                setup["checkpoint_error"] = str(e)
+    return {"status": "TRAINING_SETUP_INSPECTED", "config": setup,
+            "council_note": "C28-CALCULUS: verify hyperparameters; C25-PROMETHEUS: falsify config."}
+
+
+# ─── 12. MODELFILE INSPECTOR ─────────────────────────────────────────────────
+
+@mcp.tool()
+def model_modelfile_inspect(file_path: str) -> Dict[str, Any]:
+    """Inspect a model file (GGUF, safetensors, .pt, .bin) and return metadata."""
+    p = Path(file_path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {p}"}
+
+    ext = p.suffix.lower()
+    size_mb = round(p.stat().st_size / (1024**2), 1)
+
+    if ext in (".pt", ".pth", ".bin"):
+        try:
+            data = torch.load(p, map_location="cpu", weights_only=False)
+            sd = data.get("model_state_dict", data if isinstance(data, dict) else {})
+            return {
+                "file": p.name,
+                "format": ext,
+                "size_mb": size_mb,
+                "keys": list(sd.keys())[:20] if isinstance(sd, dict) else [],
+                "total_tensors": len(sd) if isinstance(sd, dict) else 0,
+                "has_training_config": "training_config" in data if isinstance(data, dict) else False,
+                "has_optimizer_state": "optimizer_state_dict" in data if isinstance(data, dict) else False,
+                "status": "MODELFILE_INSPECTED",
+            }
+        except Exception as e:
+            return {"error": f"Failed to load: {e}"}
+    elif ext == ".safetensors":
+        try:
+            from safetensors.torch import load_file
+            sd = load_file(str(p))
+            return {
+                "file": p.name,
+                "format": "safetensors",
+                "size_mb": size_mb,
+                "total_tensors": len(sd),
+                "keys": list(sd.keys())[:20],
+                "status": "MODELFILE_INSPECTED",
+            }
+        except ImportError:
+            return {"error": "safetensors not installed. pip install safetensors", "format": "safetensors", "size_mb": size_mb}
+        except Exception as e:
+            return {"error": str(e)}
+    elif ext == ".gguf":
+        return {
+            "file": p.name,
+            "format": "gguf",
+            "size_mb": size_mb,
+            "status": "GGUF_DETECTED",
+            "note": "Use llama.cpp or gguf library to inspect GGUF metadata.",
+        }
+    else:
+        return {"file": p.name, "format": ext, "size_mb": size_mb, "status": "UNKNOWN_FORMAT"}
+
+
+# ─── 13. MODEL COMPARISON / DIFF ─────────────────────────────────────────────
+
+@mcp.tool()
+def model_compare(checkpoint_a: str, checkpoint_b: str) -> Dict[str, Any]:
+    """Compare two checkpoints and report parameter differences."""
+    pa = Path(checkpoint_a.strip().strip('"\''))
+    pb = Path(checkpoint_b.strip().strip('"\''))
+    if not pa.exists():
+        return {"error": f"Checkpoint A not found: {pa}"}
+    if not pb.exists():
+        return {"error": f"Checkpoint B not found: {pb}"}
+    try:
+        da = torch.load(pa, map_location="cpu", weights_only=False)
+        db = torch.load(pb, map_location="cpu", weights_only=False)
+        sda = da.get("model_state_dict", da if isinstance(da, dict) else {})
+        sdb = db.get("model_state_dict", db if isinstance(db, dict) else {})
+
+        keys_a = set(sda.keys())
+        keys_b = set(sdb.keys())
+        added = keys_b - keys_a
+        removed = keys_a - keys_b
+        common = keys_a & keys_b
+
+        changed = []
+        for k in common:
+            if sda[k].shape != sdb[k].shape:
+                changed.append({"tensor": k, "shape_a": list(sda[k].shape), "shape_b": list(sdb[k].shape)})
+            elif not torch.equal(sda[k], sdb[k]):
+                diff = (sda[k] - sdb[k]).abs().mean().item()
+                changed.append({"tensor": k, "mean_abs_diff": round(diff, 6)})
+
+        return {
+            "checkpoint_a": pa.name,
+            "checkpoint_b": pb.name,
+            "tensors_in_a": len(keys_a),
+            "tensors_in_b": len(keys_b),
+            "added_tensors": list(added),
+            "removed_tensors": list(removed),
+            "changed_tensors": changed[:20],
+            "unchanged_count": len(common) - len(changed),
+            "status": "COMPARISON_COMPLETE",
+        }
+    except Exception as e:
+        return {"error": f"Comparison failed: {e}"}
+
+
+# ─── 14. GRADIENT FLOW INSPECTOR ─────────────────────────────────────────────
+
+@mcp.tool()
+def model_gradient_inspect(checkpoint_path: str) -> Dict[str, Any]:
+    """Inspect gradient statistics from a checkpoint (if optimizer state available)."""
+    p = Path(checkpoint_path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"Checkpoint not found: {p}"}
+    try:
+        data = torch.load(p, map_location="cpu", weights_only=False)
+        has_grads = "optimizer_state_dict" in data
+        result = {
+            "file": p.name,
+            "has_optimizer_state": has_grads,
+            "status": "GRADIENT_INSPECTED",
+        }
+        if has_grads:
+            opt_state = data["optimizer_state_dict"]
+            state = opt_state.get("state", {})
+            grad_stats = []
+            for param_id, ps in list(state.items())[:20]:
+                if "exp_avg" in ps:
+                    grad_stats.append({"param_id": param_id, "has_momentum": True, "has_variance": "exp_avg_sq" in ps})
+            result["gradient_entries"] = len(state)
+            result["sample_entries"] = grad_stats[:10]
+        else:
+            result["note"] = "No optimizer state in checkpoint. Gradients not available."
+        return result
+    except Exception as e:
+        return {"error": f"Failed to inspect gradients: {e}"}
+
+
+# ─── 15. HYPERPARAMETER TUNER ────────────────────────────────────────────────
+
+@mcp.tool()
+def model_hyperparameter_tune(
+    model_size_millions: float = 758.0,
+    gpu_vram_gb: float = 4.0,
+    target_batch_size: int = 4,
+    max_seq_len: int = 512,
+) -> Dict[str, Any]:
+    """Recommend optimal hyperparameters given model size and hardware constraints."""
+    # Estimate memory per sample
+    bytes_per_param = 4  # fp32
+    model_gb = model_size_millions * 1e6 * bytes_per_param / (1024**3)
+    # AdamW: 2x for optimizer states
+    train_gb = model_gb * 3  # weights + grads + optimizer
+    # Activation memory per sample
+    act_per_sample_gb = (2 * max_seq_len * 1024 * 12 * 4) / (1024**3)  # rough
+    max_batch = max(1, int((gpu_vram_gb * 0.85 - train_gb) / max(act_per_sample_gb, 0.001)))
+
+    return {
+        "model_size_millions": model_size_millions,
+        "gpu_vram_gb": gpu_vram_gb,
+        "recommended": {
+            "batch_size": min(target_batch_size, max_batch),
+            "gradient_accumulation": max(1, target_batch_size // max(1, min(target_batch_size, max_batch))),
+            "learning_rate": 3e-4 if model_size_millions < 1000 else 1e-4,
+            "weight_decay": 0.01,
+            "warmup_ratio": 0.03,
+            "max_grad_norm": 1.0,
+            "mixed_precision": "fp16" if gpu_vram_gb < 8 else "bf16",
+            "gradient_checkpointing": gpu_vram_gb < 8,
+        },
+        "memory_estimate_gb": round(train_gb + act_per_sample_gb * min(target_batch_size, max_batch), 2),
+        "max_batch_fits": max_batch,
+        "council_note": "C28-CALCULUS: verify math; C25-PROMETHEUS: falsify with 1 run.",
+    }
+
+
+# ─── 16. LEARNING RATE FINDER ────────────────────────────────────────────────
+
+@mcp.tool()
+def model_lr_finder(start_lr: float = 1e-7, end_lr: float = 1e-1, num_steps: int = 100) -> Dict[str, Any]:
+    """Generate a learning rate finder schedule (exponential range test)."""
+    import math
+    lrs = [start_lr * (end_lr / start_lr) ** (i / max(1, num_steps - 1)) for i in range(num_steps)]
+    return {
+        "start_lr": start_lr,
+        "end_lr": end_lr,
+        "num_steps": num_steps,
+        "schedule": [round(lr, 8) for lr in lrs],
+        "method": "exponential range test (Smith 2017)",
+        "interpretation": "Plot loss vs LR. Pick LR where loss decreases fastest (steepest negative slope).",
+        "council_note": "C28-CALCULUS: verify schedule math; C25-PROMETHEUS: falsify with actual run.",
+    }
+
+
+# ─── 17. MODEL EXPORT / CONVERSION ───────────────────────────────────────────
+
+@mcp.tool()
+def model_export(checkpoint_path: str, target_format: str = "onnx", output_path: str = "") -> Dict[str, Any]:
+    """Generate export instructions for converting a checkpoint to another format."""
+    p = Path(checkpoint_path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"Checkpoint not found: {p}"}
+    formats = {
+        "onnx": {"tool": "torch.onnx.export", "cmd": f"torch.onnx.export(model, dummy_input, '{output_path or 'model.onnx'}', opset_version=17)"},
+        "safetensors": {"tool": "safetensors.torch.save_file", "cmd": "from safetensors.torch import save_file; save_file(state_dict, 'model.safetensors')"},
+        "gguf": {"tool": "llama.cpp convert", "cmd": "python convert.py --outtype f16 model.pt"},
+        "torchscript": {"tool": "torch.jit.trace", "cmd": "traced = torch.jit.trace(model, dummy_input); traced.save('model.pt')"},
+    }
+    info = formats.get(target_format.lower(), formats["onnx"])
+    return {
+        "source": p.name,
+        "target_format": target_format,
+        "tool": info["tool"],
+        "command": info["cmd"],
+        "output_path": output_path or f"model.{target_format}",
+        "council_note": "C26-TECHNE: format compatibility; C10-CODEWEAVER: export validation.",
+    }
+
+
+# ─── 18. TOKENIZER ANALYZER ──────────────────────────────────────────────────
+
+@mcp.tool()
+def model_tokenizer_analyze(vocab_size: int = 50257, sample_text: str = "Hello, Quillan-Ronin!") -> Dict[str, Any]:
+    """Analyze tokenizer properties and estimate token counts."""
+    # Rough BPE estimation
+    words = sample_text.split()
+    estimated_tokens = len(words) + len(sample_text) // 4  # rough BPE estimate
+    return {
+        "vocab_size": vocab_size,
+        "sample_text": sample_text,
+        "estimated_token_count": estimated_tokens,
+        "chars_per_token_avg": round(len(sample_text) / max(1, estimated_tokens), 2),
+        "vocab_utilization": "depends on corpus",
+        "special_tokens": ["<|endoftext|>", "<|assistant|>", "<|user|>", "<|system|>"],
+        "council_note": "C9-AETHER: semantic mapping; C33-TYPIST: token efficiency.",
+    }
+
+
+# ─── 19. EMBEDDING VISUALIZER ────────────────────────────────────────────────
+
+@mcp.tool()
+def model_embedding_stats(checkpoint_path: str, layer_name: str = "wte") -> Dict[str, Any]:
+    """Compute embedding layer statistics (norms, variance, isotropy)."""
+    p = Path(checkpoint_path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"Checkpoint not found: {p}"}
+    try:
+        data = torch.load(p, map_location="cpu", weights_only=False)
+        sd = data.get("model_state_dict", data if isinstance(data, dict) else {})
+        # Find embedding layer
+        emb_key = None
+        for k in sd.keys():
+            if layer_name in k and "weight" in k:
+                emb_key = k
+                break
+        if not emb_key:
+            return {"error": f"No embedding layer found matching '{layer_name}'. Available: {list(sd.keys())[:10]}"}
+        emb = sd[emb_key]
+        norms = emb.norm(dim=1)
+        return {
+            "layer": emb_key,
+            "shape": list(emb.shape),
+            "vocab_size": emb.shape[0],
+            "embedding_dim": emb.shape[1],
+            "mean_norm": round(float(norms.mean()), 4),
+            "std_norm": round(float(norms.std()), 4),
+            "min_norm": round(float(norms.min()), 4),
+            "max_norm": round(float(norms.max()), 4),
+            "isotropy": round(float(norms.std() / norms.mean()), 4) if norms.mean() > 0 else 0,
+            "council_note": "C28-CALCULUS: embedding quality; C9-AETHER: semantic space.",
+        }
+    except Exception as e:
+        return {"error": f"Failed: {e}"}
+
+
+# ─── 20. MODEL BENCHMARKING ──────────────────────────────────────────────────
+
+@mcp.tool()
+def model_benchmark(model_size_millions: float = 758.0, seq_len: int = 512, batch_size: int = 1) -> Dict[str, Any]:
+    """Estimate model inference/training throughput and memory."""
+    # Rough estimates based on transformer FLOPs
+    params = model_size_millions * 1e6
+    # FLOPs per token ~ 2 * params (forward) + 4 * params (backward)
+    fwd_flops = 2 * params * seq_len * batch_size
+    bwd_flops = 4 * params * seq_len * batch_size
+    # Assume 1 TFLOP/s for CPU, 10 TFLOP/s for GPU
+    cpu_tokens_per_sec = 1e12 / (2 * params)  # rough
+    gpu_tokens_per_sec = 1e13 / (2 * params)
+    return {
+        "model_size_millions": model_size_millions,
+        "seq_len": seq_len,
+        "batch_size": batch_size,
+        "estimated_fwd_flops": fwd_flops,
+        "estimated_bwd_flops": bwd_flops,
+        "estimated_cpu_tokens_per_sec": round(cpu_tokens_per_sec, 1),
+        "estimated_gpu_tokens_per_sec": round(gpu_tokens_per_sec, 1),
+        "memory_fp32_gb": round(params * 4 / (1024**3), 2),
+        "memory_fp16_gb": round(params * 2 / (1024**3), 2),
+        "memory_int8_gb": round(params * 1 / (1024**3), 2),
+        "council_note": "C14-KAIDO: efficiency; C26-TECHNE: hardware constraints.",
+    }
+
+
+# ─── 21. FINE-TUNING CONFIG GENERATOR ────────────────────────────────────────
+
+@mcp.tool()
+def model_finetune_config(
+    model_size_millions: float = 758.0,
+    method: str = "lora",
+    target_modules: str = "q_proj,v_proj",
+    lora_rank: int = 8,
+    lora_alpha: float = 16.0,
+) -> Dict[str, Any]:
+    """Generate a fine-tuning configuration (LoRA, QLoRA, full, or prefix)."""
+    modules = [m.strip() for m in target_modules.split(",") if m.strip()]
+    configs = {
+        "lora": {
+            "method": "LoRA",
+            "target_modules": modules,
+            "r": lora_rank,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": 0.05,
+            "bias": "none",
+            "task_type": "CAUSAL_LM",
+        },
+        "qlora": {
+            "method": "QLoRA",
+            "target_modules": modules,
+            "r": lora_rank,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": 0.05,
+            "quantization": "4-bit (NF4)",
+            "compute_dtype": "bfloat16",
+            "task_type": "CAUSAL_LM",
+        },
+        "full": {
+            "method": "Full Fine-Tuning",
+            "trainable_params": "all",
+            "task_type": "CAUSAL_LM",
+        },
+        "prefix": {
+            "method": "Prefix Tuning",
+            "num_virtual_tokens": 20,
+            "task_type": "CAUSAL_LM",
+        },
+    }
+    config = configs.get(method.lower(), configs["lora"])
+    # Estimate trainable params
+    trainable = 0
+    if method.lower() in ("lora", "qlora"):
+        for mod in modules:
+            trainable += lora_rank * 1024 * 2  # rough
+    return {
+        "method": method,
+        "config": config,
+        "estimated_trainable_params": trainable,
+        "trainable_pct": round(trainable / (model_size_millions * 1e6) * 100, 4) if model_size_millions > 0 else 0,
+        "council_note": "C28-CALCULUS: verify params; C25-PROMETHEUS: falsify with 1 epoch.",
+    }
+
+
+# ─── 22. LOSS CURVE ANALYZER ─────────────────────────────────────────────────
+
+@mcp.tool()
+def model_loss_analyze(losses: str, window: int = 10) -> Dict[str, Any]:
+    """Analyze a loss curve for trends, plateaus, and anomalies."""
+    loss_list = [float(x.strip()) for x in losses.split(",") if x.strip()]
+    if not loss_list:
+        return {"error": "No losses provided."}
+
+    # Moving average
+    ma = []
+    for i in range(len(loss_list)):
+        start = max(0, i - window + 1)
+        ma.append(round(sum(loss_list[start:i+1]) / (i - start + 1), 4))
+
+    # Detect plateau (last 5 losses within 1% of each other)
+    last_5 = loss_list[-5:] if len(loss_list) >= 5 else loss_list
+    plateau = (max(last_5) - min(last_5)) / max(abs(min(last_5)), 1e-8) < 0.01
+
+    # Detect spike (any loss > 2x previous)
+    spikes = []
+    for i in range(1, len(loss_list)):
+        if loss_list[i] > 2 * loss_list[i-1]:
+            spikes.append({"step": i, "loss": loss_list[i], "prev": loss_list[i-1]})
+
+    # Trend
+    if len(loss_list) >= 2:
+        trend = "decreasing" if loss_list[-1] < loss_list[0] else "increasing"
+    else:
+        trend = "insufficient_data"
+
+    return {
+        "total_steps": len(loss_list),
+        "initial_loss": loss_list[0],
+        "final_loss": loss_list[-1],
+        "min_loss": min(loss_list),
+        "max_loss": max(loss_list),
+        "moving_average_last": ma[-1] if ma else None,
+        "plateau_detected": plateau,
+        "spikes": spikes,
+        "trend": trend,
+        "council_note": "C28-CALCULUS: verify trends; C25-PROMETHEUS: falsify with more data.",
+    }
+
+
 # --- Quillan-Ronin Global Error-Handling Middleware ---
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 import logging as _log

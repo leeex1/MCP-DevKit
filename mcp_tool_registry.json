@@ -3,7 +3,7 @@
   "last_synced": "2026-10-21T15:44:15Z",
   "summary": {
     "quillan_mcp_servers": 19,
-    "quillan_mcp_tools": 276,
+    "quillan_mcp_tools": 289,
     "standard_mcps": {
       "servers": 13,
       "tools": 130
@@ -1324,7 +1324,7 @@
       ]
     },
     "quillan_model_lab": {
-      "tool_count": 9,
+      "tool_count": 22,
       "tools": [
         {
           "name": "model_checkpoint_inspect",
