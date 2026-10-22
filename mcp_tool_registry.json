@@ -3,7 +3,7 @@
   "last_synced": "2026-10-21T15:44:15Z",
   "summary": {
     "quillan_mcp_servers": 19,
-    "quillan_mcp_tools": 253,
+    "quillan_mcp_tools": 263,
     "standard_mcps": {
       "servers": 13,
       "tools": 130
@@ -894,7 +894,7 @@
       ]
     },
     "quillan_governor": {
-      "tool_count": 12,
+      "tool_count": 22,
       "tools": [
         {
           "name": "governor_system_health",
