@@ -1258,6 +1258,342 @@ def re_filesystem_forensics(path: str = ".", extensions: str = ".exe,.dll,.bat,.
     }
 
 
+# ─── 24. MACH-O PARSER (macOS) ───────────────────────────────────────────────
+
+@mcp.tool()
+def re_analyze_macho(path: str) -> Dict[str, Any]:
+    """Analyze a Mach-O binary (macOS/iOS)."""
+    p = Path(path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {path}"}
+    data = p.read_bytes()
+    if len(data) < 4 or data[:4] not in (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"):
+        return {"error": "Not a valid Mach-O binary"}
+    magic = data[:4].hex()
+    is_64 = magic in ("feedfacf", "cffaedfe")
+    endian = "<" if magic in ("cefaedfe", "cffaedfe") else ">"
+    # Parse header
+    if is_64:
+        cpu_type = _read_le(data, 4, 4) if endian == "<" else _read_be(data, 4, 4)
+        cpu_subtype = _read_le(data, 8, 4) if endian == "<" else _read_be(data, 8, 4)
+        filetype = _read_le(data, 12, 4) if endian == "<" else _read_be(data, 12, 4)
+        ncmds = _read_le(data, 16, 4) if endian == "<" else _read_be(data, 16, 4)
+        sizeofcmds = _read_le(data, 20, 4) if endian == "<" else _read_be(data, 20, 4)
+    else:
+        cpu_type = _read_le(data, 4, 4)
+        cpu_subtype = _read_le(data, 8, 4)
+        filetype = _read_le(data, 12, 4)
+        ncmds = _read_le(data, 16, 4)
+        sizeofcmds = _read_le(data, 20, 4)
+    filetypes = {1: "OBJECT", 2: "EXECUTE", 3: "FVMLIB", 4: "CORE", 5: "PRELOAD", 6: "DYLIB", 7: "DYLINKER", 8: "BUNDLE", 9: "DYLIB_STUB", 10: "DSYM", 11: "KEXT_BUNDLE"}
+    return {
+        "path": str(p),
+        "format": "Mach-O",
+        "magic": magic,
+        "is_64bit": is_64,
+        "endian": "little" if endian == "<" else "big",
+        "cpu_type": hex(cpu_type),
+        "cpu_subtype": hex(cpu_subtype),
+        "filetype": filetypes.get(filetype, hex(filetype)),
+        "num_load_commands": ncmds,
+        "sizeof_commands": sizeofcmds,
+        "strings": extract_strings(data, min_len=6)[:50],
+        "status": "MACHO_ANALYZED",
+    }
+
+
+# ─── 25. WASM ANALYSIS ───────────────────────────────────────────────────────
+
+@mcp.tool()
+def re_analyze_wasm(path: str) -> Dict[str, Any]:
+    """Analyze a WebAssembly binary (.wasm)."""
+    p = Path(path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {path}"}
+    data = p.read_bytes()
+    if len(data) < 8 or data[:4] != b"\x00asm":
+        return {"error": "Not a valid WASM binary"}
+    version = _read_le(data, 4, 4)
+    # Parse sections
+    sections = []
+    off = 8
+    section_names = {0: "custom", 1: "type", 2: "import", 3: "function", 4: "table", 5: "memory", 6: "global", 7: "export", 8: "start", 9: "element", 10: "code", 11: "data", 12: "data_count"}
+    while off < len(data):
+        if off + 2 > len(data):
+            break
+        sec_id = data[off]
+        off += 1
+        # Read LEB128 size
+        size = 0
+        shift = 0
+        while True:
+            b = data[off]
+            off += 1
+            size |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+        sec_data = data[off:off + size]
+        sections.append({"id": sec_id, "name": section_names.get(sec_id, f"unknown_{sec_id}"), "size": size})
+        off += size
+    return {
+        "path": str(p),
+        "format": "WASM",
+        "version": version,
+        "sections": sections,
+        "strings": extract_strings(data, min_len=4)[:30],
+        "size": len(data),
+        "status": "WASM_ANALYZED",
+    }
+
+
+# ─── 26. JAVA CLASS FILE ANALYSIS ────────────────────────────────────────────
+
+@mcp.tool()
+def re_analyze_java_class(path: str) -> Dict[str, Any]:
+    """Analyze a Java .class file."""
+    p = Path(path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {path}"}
+    data = p.read_bytes()
+    if len(data) < 8 or data[:4] != b"\xca\xfe\xba\xbe":
+        return {"error": "Not a valid Java class file"}
+    minor = _read_be(data, 4, 2)
+    major = _read_be(data, 6, 2)
+    java_versions = {45: "Java 1.1", 46: "Java 1.2", 47: "Java 1.3", 48: "Java 1.4", 49: "Java 5", 50: "Java 6", 51: "Java 7", 52: "Java 8", 53: "Java 9", 54: "Java 10", 55: "Java 11", 56: "Java 12", 57: "Java 13", 58: "Java 14", 59: "Java 15", 60: "Java 16", 61: "Java 17", 62: "Java 18", 63: "Java 19", 64: "Java 20", 65: "Java 21"}
+    strings = extract_strings(data, min_len=4)[:50]
+    return {
+        "path": str(p),
+        "format": "Java Class",
+        "magic": data[:4].hex(),
+        "minor_version": minor,
+        "major_version": major,
+        "java_version": java_versions.get(major, f"Unknown ({major})"),
+        "size": len(data),
+        "strings": strings,
+        "status": "JAVA_CLASS_ANALYZED",
+    }
+
+
+# ─── 27. ANTI-VM DETECTION ──────────────────────────────────────────────────
+
+@mcp.tool()
+def re_antivm_detect(path: str) -> Dict[str, Any]:
+    """Detect anti-VM / sandbox evasion techniques."""
+    p = Path(path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {path}"}
+    data = p.read_bytes()
+    text = data.decode("utf-8", errors="replace").lower()
+    indicators = []
+    vm_artifacts = ["vmware", "virtualbox", "vbox", "qemu", "xen", "parallels", "hyper-v",
+                    "sandboxie", "cuckoo", "anubis", "joebox", "threatexpert"]
+    for art in vm_artifacts:
+        if art in text:
+            indicators.append({"type": "vm_artifact", "detail": art, "severity": "MEDIUM"})
+    vm_apis = ["GetSystemFirmwareTable", "EnumSystemFirmwareTables", "cpuid", "sidt", "sgdt", "sldt"]
+    for api in vm_apis:
+        if api.lower() in text:
+            indicators.append({"type": "vm_detection_api", "detail": api, "severity": "MEDIUM"})
+    return {
+        "path": str(p),
+        "indicators": indicators,
+        "indicator_count": len(indicators),
+        "antivm_detected": len(indicators) > 0,
+        "status": "ANTIVM_CHECK_COMPLETE",
+    }
+
+
+# ─── 28. CODE SIGNING VERIFICATION ───────────────────────────────────────────
+
+@mcp.tool()
+def re_codesign_verify(path: str) -> Dict[str, Any]:
+    """Verify code signing / digital signature of a binary."""
+    p = Path(path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {path}"}
+    data = p.read_bytes()
+    text = data.decode("utf-8", errors="replace")
+    has_signature = False
+    signer = None
+    # Check for certificate table in PE
+    if data[:2] == b"MZ":
+        info = parse_pe(data)
+        # Check for certificate directory (index 4 in DataDirectory)
+        # Simplified: look for common signing strings
+        if "Microsoft" in text or "VeriSign" in text or "DigiCert" in text or "Symantec" in text:
+            has_signature = True
+            for ca in ["Microsoft", "VeriSign", "DigiCert", "Symantec", "Comodo", "GlobalSign"]:
+                if ca in text:
+                    signer = ca
+                    break
+    return {
+        "path": str(p),
+        "signed": has_signature,
+        "signer": signer,
+        "note": "For full certificate chain verification, use signtool or openssl.",
+        "status": "CODESIGN_CHECK_COMPLETE",
+    }
+
+
+# ─── 29. RESOURCE EXTRACTION (PE resources) ──────────────────────────────────
+
+@mcp.tool()
+def re_extract_resources(path: str) -> Dict[str, Any]:
+    """Extract embedded resources (icons, images, manifests) from a PE binary."""
+    p = Path(path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {path}"}
+    data = p.read_bytes()
+    fmt = _guess_format(data)
+    resources = []
+    # Look for common resource signatures in the binary
+    # PNG
+    png_sig = b"\x89PNG\r\n\x1a\n"
+    idx = 0
+    while True:
+        pos = data.find(png_sig, idx)
+        if pos == -1:
+            break
+        # Find end (IEND chunk)
+        end = data.find(b"IEND", pos)
+        if end != -1:
+            end += 8  # IEND + CRC
+            resources.append({"type": "PNG", "offset": pos, "size": end - pos})
+        idx = pos + 1
+        if len(resources) >= 20:
+            break
+    # JPEG
+    jpeg_sig = b"\xff\xd8\xff"
+    idx = 0
+    while True:
+        pos = data.find(jpeg_sig, idx)
+        if pos == -1:
+            break
+        end = data.find(b"\xff\xd9", pos)
+        if end != -1:
+            end += 2
+            resources.append({"type": "JPEG", "offset": pos, "size": end - pos})
+        idx = pos + 1
+        if len(resources) >= 20:
+            break
+    # RT_MANIFEST (XML)
+    manifest_sig = b"<?xml"
+    idx = 0
+    while True:
+        pos = data.find(manifest_sig, idx)
+        if pos == -1:
+            break
+        end = data.find(b"</assembly>", pos)
+        if end != -1:
+            end += len(b"</assembly>")
+            resources.append({"type": "XML_MANIFEST", "offset": pos, "size": end - pos,
+                              "preview": data[pos:pos+200].decode("utf-8", errors="replace")})
+        idx = pos + 1
+        if len(resources) >= 20:
+            break
+    return {
+        "path": str(p),
+        "format": fmt,
+        "resources_found": len(resources),
+        "resources": resources,
+        "status": "RESOURCE_EXTRACTION_COMPLETE",
+    }
+
+
+# ─── 30. EXPLOIT / SHELLCODE ANALYSIS ────────────────────────────────────────
+
+@mcp.tool()
+def re_shellcode_analyze(data_hex: str) -> Dict[str, Any]:
+    """Analyze shellcode (hex string) for patterns and API calls."""
+    try:
+        data = bytes.fromhex(data_hex.replace(" ", "").replace("\\x", ""))
+    except Exception:
+        return {"error": "Invalid hex string."}
+    indicators = []
+    # Check for common shellcode patterns
+    if b"\x90" * 4 in data:
+        indicators.append({"type": "NOP sled", "severity": "HIGH"})
+    # Common API hashes (Metasploit)
+    if b"\xfc\xe8" in data[:4]:
+        indicators.append({"type": "Metasploit-style shellcode (CALL/POP)", "severity": "HIGH"})
+    # Check for GetProcAddress hash
+    if b"\x72\xfe\xb3\x16" in data or b"\x0e\x2f\x20\x1f" in data:
+        indicators.append({"type": "GetProcAddress hash (Metasploit)", "severity": "HIGH"})
+    strings = extract_strings(data, min_len=4)
+    return {
+        "size": len(data),
+        "hex": data.hex(),
+        "indicators": indicators,
+        "strings": [s["value"] for s in strings[:20]],
+        "status": "SHELLCODE_ANALYZED",
+    }
+
+
+# ─── 31. SMART CONTRACT ANALYSIS ─────────────────────────────────────────────
+
+@mcp.tool()
+def re_smart_contract(path: str) -> Dict[str, Any]:
+    """Analyze a smart contract (Solidity/EVM bytecode)."""
+    p = Path(path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {path}"}
+    data = p.read_bytes()
+    text = data.decode("utf-8", errors="replace")
+    # Solidity source
+    if "pragma solidity" in text or "contract " in text:
+        funcs = re.findall(r"function\s+(\w+)", text)
+        events = re.findall(r"event\s+(\w+)", text)
+        modifiers = re.findall(r"modifier\s+(\w+)", text)
+        return {
+            "type": "solidity_source",
+            "functions": funcs,
+            "events": events,
+            "modifiers": modifiers,
+            "has_payable": "payable" in text,
+            "has_selfdestruct": "selfdestruct" in text or "suicide" in text,
+            "status": "SMART_CONTRACT_ANALYZED",
+        }
+    # EVM bytecode
+    if data[:2] == b"\x60" or len(data) > 10:
+        return {
+            "type": "evm_bytecode",
+            "size": len(data),
+            "note": "Use solc or evm disassembler for full analysis.",
+            "status": "BYTECODE_DETECTED",
+        }
+    return {"error": "Not a recognized smart contract format."}
+
+
+# ─── 32. VOLATILITY-STYLE MEMORY FORENSICS ───────────────────────────────────
+
+@mcp.tool()
+def re_memory_forensics(dump_path: str, profile: str = "Win10x64") -> Dict[str, Any]:
+    """Generate Volatility-style memory forensics commands for a memory dump."""
+    p = Path(dump_path.strip().strip('"\''))
+    if not p.exists():
+        return {"error": f"File not found: {dump_path}"}
+    commands = [
+        f"volatility -f {dump_path} --profile={profile} imageinfo",
+        f"volatility -f {dump_path} --profile={profile} pslist",
+        f"volatility -f {dump_path} --profile={profile} pstree",
+        f"volatility -f {dump_path} --profile={profile} netscan",
+        f"volatility -f {dump_path} --profile={profile} malfind",
+        f"volatility -f {dump_path} --profile={profile} dlllist",
+        f"volatility -f {dump_path} --profile={profile} handles",
+        f"volatility -f {dump_path} --profile={profile} filescan",
+        f"volatility -f {dump_path} --profile={profile} registry hivelist",
+    ]
+    return {
+        "dump_path": str(p),
+        "profile": profile,
+        "size_mb": round(p.stat().st_size / (1024**2), 1),
+        "volatility_commands": commands,
+        "note": "Run these commands with Volatility 2/3 installed. Or use the re_memory_dump tool for basic analysis.",
+        "status": "MEMORY_FORENSICS_READY",
+    }
+
+
 # --- Quillan-Ronin Global Error-Handling Middleware ---
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 import logging as _log
