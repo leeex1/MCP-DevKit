@@ -20,6 +20,15 @@ Each MCP is imported directly (in-process) for zero-latency chaining.
 """
 
 import sys
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+import logging, builtins
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if 'file' not in kwargs or kwargs['file'] is None or kwargs['file'] is sys.stdout:
+        kwargs['file'] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
 import os
 import json
 import time
@@ -34,17 +43,18 @@ if sys.platform == "win32":
 
 from fastmcp import FastMCP
 
-mcp = FastMCP("QuillanOrchestrator")
-
+from pathlib import Path
 SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_orchestrator\sessions")
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
-# ─── IN-PROCESS MCP IMPORTS ─────────────────────────────────────────────────
-# Each MCP server is imported directly so we can call its tools without
-# subprocess overhead. Each server module exposes a `mcp` FastMCP instance
-# with registered tools we can call via server.mcp.call_tool().
-
-_MCP_MODULES: Dict[str, Any] = {}
+mcp = FastMCP("QuillanOrchestrator")
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_orchestrator', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_orchestrator] _shared warning: {_shared_err}', file=_sys.stderr)
 
 def _load_mcp(module_name: str, server_path: str) -> Any:
     """Lazy-load an MCP server module by path."""
@@ -346,7 +356,7 @@ async def _orch_re(path: str, persist: bool) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def orchestrator_health() -> Dict[str, Any]:
+async def orchestrator_health() -> Dict[str, Any]:
     """Dashboard summary across all MCPs."""
     health = {}
     for name, path in _MCP_PATHS.items():
@@ -354,7 +364,7 @@ def orchestrator_health() -> Dict[str, Any]:
             mod = _load_mcp(name, path)
             # Try calling health if it exists
             if hasattr(mod.mcp, 'list_tools'):
-                tools = asyncio.run(mod.mcp.list_tools())
+                tools = await mod.mcp.list_tools()
                 health[name] = {"tools": len(tools), "status": "ACTIVE"}
             else:
                 health[name] = {"status": "LOADED"}
@@ -404,5 +414,20 @@ def orchestrator_session_replay(session_id: str) -> Dict[str, Any]:
         return {"error": f"Read failed: {e}"}
 
 
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     mcp.run()

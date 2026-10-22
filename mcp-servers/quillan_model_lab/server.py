@@ -16,6 +16,35 @@ Embodying C28-CALCULUS, C6-OMNIS, and Optimization Specialist:
 
 import sys
 import os
+import logging
+import builtins
+
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+# Ensure all logs and prints go strictly to stderr to prevent stdio JSON-RPC corruption
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if "file" not in kwargs or kwargs["file"] is None or kwargs["file"] is sys.stdout:
+        kwargs["file"] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
+
+# --- Unified Cross-Platform PYTHONPATH Injection ---
+_BASE_PATHS = [
+    r"C:\02_QUILLAN\09 - Projects\mcp",
+    r"C:\02_QUILLAN\09 - Projects\projects\oni",
+    r"C:\02_QUILLAN\03 - Training & Model\scripts",
+    r"C:\02_QUILLAN",
+]
+for _bp in _BASE_PATHS:
+    if os.name != "nt":
+        if _bp.startswith("C:") or _bp.startswith("c:"):
+            _bp = "/mnt/c/" + _bp[3:].replace("\\", "/")
+    if os.path.exists(_bp) and _bp not in sys.path:
+        sys.path.insert(0, _bp)
+
+
+
 import math
 import json
 import time
@@ -31,56 +60,21 @@ import torch
 from fastmcp import FastMCP
 
 mcp = FastMCP("QuillanModelLab")
-
-SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_model_lab\sessions")
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
-# ─── 1. CHECKPOINT INSPECTOR ─────────────────────────────────────────────────
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_model_lab', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_model_lab] _shared warning: {_shared_err}', file=_sys.stderr)
 
 @mcp.tool()
 def model_checkpoint_inspect(checkpoint_path: str) -> Dict[str, Any]:
-    """Inspects a PyTorch model checkpoint (.pt) without memory pressure."""
-    p = Path(checkpoint_path.strip().strip('"\''))
+    """Inspect a Quillan checkpoint file and return metadata."""
+    p = Path(checkpoint_path.strip().strip(chr(34)).strip(chr(39)))
     if not p.exists():
-        return {"error": f"Checkpoint not found: {p}"}
-
-    try:
-        data = torch.load(p, map_location="cpu", weights_only=False)
-        keys = list(data.keys())
-
-        info = {
-            "file_name": p.name,
-            "size_mb": round(p.stat().st_size / (1024 * 1024), 2),
-            "keys_present": keys,
-            "step": data.get("step", "N/A"),
-            "loss": round(float(data.get("loss", 0.0)), 4) if "loss" in data else "N/A",
-            "val_loss": round(float(data.get("val_loss", 0.0)), 4) if "val_loss" in data else "N/A",
-            "ppl": round(float(data.get("ppl", 0.0)), 2) if "ppl" in data else "N/A",
-            "engine": data.get("engine", "N/A"),
-        }
-
-        if "config" in data and isinstance(data["config"], dict):
-            cfg = data["config"]
-            info["model_config"] = {
-                "n_layer": cfg.get("n_layer"),
-                "hidden_dim": cfg.get("hidden_dim"),
-                "n_head": cfg.get("n_head"),
-                "num_experts": cfg.get("num_experts"),
-                "max_seq_len": cfg.get("max_seq_len"),
-                "vocab_size": cfg.get("vocab_size"),
-            }
-
-        if "model_state_dict" in data:
-            sd = data["model_state_dict"]
-            total_params = sum(t.numel() for t in sd.values())
-            info["total_parameters"] = f"{total_params:,}"
-            info["tensor_count"] = len(sd)
-
-        del data
-        return info
-
-    except Exception as e:
-        return {"error": f"Failed to inspect checkpoint: {e}"}
+        return {"error": "Checkpoint not found: " + str(p)}
 
 # ─── 2. DATASET VALIDATOR & PROFILER ─────────────────────────────────────────
 
@@ -334,5 +328,20 @@ def model_lab_session_replay(session_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"Read failed: {e}"}
 
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     mcp.run()

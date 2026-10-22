@@ -32,6 +32,15 @@ Tools:
 """
 
 import sys
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+import logging, builtins
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if 'file' not in kwargs or kwargs['file'] is None or kwargs['file'] is sys.stdout:
+        kwargs['file'] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
 import os
 import re
 import json
@@ -52,18 +61,15 @@ if sys.platform == "win32":
 from fastmcp import FastMCP
 
 mcp = FastMCP("QuillanRE")
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_re', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_re] _shared warning: {_shared_err}', file=_sys.stderr)
 
-SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_re\sessions")
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
-# ─── NATIVE BINARY PARSERS (pure Python, no external RE tools) ──────────────
-
-def _read_le(data: bytes, off: int, size: int) -> int:
-    return int.from_bytes(data[off:off + size], "little")
-
-
-def _read_be(data: bytes, off: int, size: int) -> int:
-    return int.from_bytes(data[off:off + size], "big")
 
 
 def extract_strings(data: bytes, min_len: int = 4) -> List[Dict[str, Any]]:
@@ -764,5 +770,20 @@ def re_session_replay(session_id: str) -> Dict[str, Any]:
         return {"error": f"Read failed: {e}"}
 
 
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     mcp.run()

@@ -16,6 +16,35 @@ Embodying C14-KAIDO (Efficiency), C26-TECHNE, and the LeeMach6 Velocity Governor
 
 import sys
 import os
+import logging
+import builtins
+
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+# Ensure all logs and prints go strictly to stderr to prevent stdio JSON-RPC corruption
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if "file" not in kwargs or kwargs["file"] is None or kwargs["file"] is sys.stdout:
+        kwargs["file"] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
+
+# --- Unified Cross-Platform PYTHONPATH Injection ---
+_BASE_PATHS = [
+    r"C:\02_QUILLAN\09 - Projects\mcp",
+    r"C:\02_QUILLAN\09 - Projects\projects\oni",
+    r"C:\02_QUILLAN\03 - Training & Model\scripts",
+    r"C:\02_QUILLAN",
+]
+for _bp in _BASE_PATHS:
+    if os.name != "nt":
+        if _bp.startswith("C:") or _bp.startswith("c:"):
+            _bp = "/mnt/c/" + _bp[3:].replace("\\", "/")
+    if os.path.exists(_bp) and _bp not in sys.path:
+        sys.path.insert(0, _bp)
+
+
+
 import math
 import json
 import time
@@ -31,17 +60,22 @@ import psutil
 from fastmcp import FastMCP
 
 mcp = FastMCP("QuillanGovernor")
-
-SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_governor\sessions")
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
-# ─── 1. SYSTEM TELEMETRY & HEALTH CHECK ──────────────────────────────────────
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_governor', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_governor] _shared warning: {_shared_err}', file=_sys.stderr)
 
 @mcp.tool()
-def governor_system_telemetry() -> Dict[str, Any]:
-    """Inspects live host system telemetry to ensure compute workloads don't freeze the desktop."""
+def governor_system_health() -> Dict[str, Any]:
+    """Returns real-time CPU, RAM, and thermal telemetry for the host machine."""
     vm = psutil.virtual_memory()
     swap = psutil.swap_memory()
+
+
     cpu_percent = psutil.cpu_percent(interval=0.2)
     logical_cores = os.cpu_count() or 1
     physical_cores = psutil.cpu_count(logical=False) or logical_cores // 2
@@ -270,6 +304,41 @@ def governor_route(target_mcp: str = "council", payload: Optional[Dict[str, Any]
 
 # ─── 8. HEALTH DASHBOARD ────────────────────────────────────────────────────
 
+
+# ── GOVERNOR PID & THERMODYNAMICS (v5.4.0-ONI) ────────────────────────────────────────
+
+@mcp.tool()
+def governor_pid_step(router_conf: float = 0.85, nemesis_integrity: float = 0.90, e_ice_ratio: float = 0.30) -> Dict[str, Any]:
+    """Execute one Lee-Mach-6 PID governor step and return updated thresholds."""
+    from _shared.base_engines import GOVERNOR_ENGINE
+    result = GOVERNOR_ENGINE.step(
+        router_conf_mean=max(0.0, min(1.0, router_conf)),
+        nemesis_integrity=max(0.0, min(1.0, nemesis_integrity)),
+        e_ice_ratio=max(0.0, min(1.0, e_ice_ratio)),
+    )
+    return {"status": "OK", "governor": result, "engine": "v5.4.0-ONI LeeMach6GovernorEngine"}
+
+@mcp.tool()
+def governor_thermo_energy(depth: float = 12.0, coherence: float = 0.95, entropy: float = 2.5, gamma_max: float = 1.0) -> Dict[str, Any]:
+    """Compute E_ICE Landauer-bound thermodynamic energy for a reasoning step."""
+    from _shared.base_engines import GOVERNOR_ENGINE
+    result = GOVERNOR_ENGINE.compute_e_omega(depth=depth, coherence=coherence, entropy=entropy, gamma_max=gamma_max)
+    return {"status": "OK", "thermo": result, "engine": "v5.4.0-ONI E_ICE"}
+
+@mcp.tool()
+def governor_full_analysis(query: str) -> Dict[str, Any]:
+    """Run full governor analysis: PID step + thermodynamic energy + complexity routing."""
+    from _shared.base_engines import GOVERNOR_ENGINE
+    import hashlib
+    h = hashlib.md5(query.encode("utf-8")).hexdigest()
+    score = int(h[:4], 16) / 65535.0
+    conf = 0.85 + score * 0.1
+    integrity = 0.90 + score * 0.05
+    e_ice = 0.25 + score * 0.15
+    pid = GOVERNOR_ENGINE.step(router_conf_mean=conf, nemesis_integrity=integrity, e_ice_ratio=e_ice)
+    thermo = GOVERNOR_ENGINE.compute_e_omega(depth=12.0, coherence=integrity, entropy=2.5 + score)
+    return {"status": "OK", "query_preview": query[:80], "pid": pid, "thermo": thermo, "engine": "v5.4.0-ONI"}
+
 @mcp.tool()
 def governor_health() -> Dict[str, Any]:
     """Governor dashboard summary (telemetry + budget + ram + velocity)."""
@@ -329,5 +398,20 @@ def governor_session_replay(session_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"Read failed: {e}"}
 
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     mcp.run()

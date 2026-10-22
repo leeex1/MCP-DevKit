@@ -5,13 +5,13 @@
 ==========================================================================
 Orochi is a self-modifying, self-evolving cognitive engine that can rewrite its
 own system prompt and propose weight evolutions. It runs a closed-loop
-auto-improvement cycle: Evaluate → Mutate → Select → Deploy.
+auto-improvement cycle: Evaluate -> Mutate -> Select -> Deploy.
 
 Core capabilities:
   • Prompt mutation / evolution (system prompt rewriting & versioning)
   • EGGROLL low-rank weight evolution proposals (U @ V^T deltas, stored + staged)
   • Nemesis-Alpha adversarial evaluation (challenger hunts weaknesses)
-  • Auto-improvement loop (evaluate → mutate → select → deploy)
+  • Auto-improvement loop (evaluate -> mutate -> select -> deploy)
   • Snapshot / rollback state management
   • Cross-MCP routing (orchestrator integration)
   • Persistence (sessions + snapshots)
@@ -28,16 +28,25 @@ Tools:
   1. orochi_mutate_prompt     — Generate mutated prompt variants from a base
   2. orochi_evolve_weights    — EGGROLL low-rank weight-delta proposals
   3. orochi_evaluate          — Nemesis-Alpha adversarial evaluation
-  4. orochi_auto_improve      — Full evaluate→mutate→select→deploy cycle
+  4. orochi_auto_improve      — Full evaluate->mutate->select->deploy cycle
   5. orochi_snapshot          — Save current Orochi state snapshot
   6. orochi_rollback          — Roll back to a previous snapshot
-  7. orochi_full_pipeline     — Chain mutate → evaluate → snapshot
+  7. orochi_full_pipeline     — Chain mutate -> evaluate -> snapshot
   8. orochi_route             — Cross-MCP routing (orchestrator/code/council)
   9. orochi_health            — Orochi engine dashboard
   10. orochi_session_list / orochi_session_replay — persistence
 """
 
 import sys
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+import logging, builtins
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if 'file' not in kwargs or kwargs['file'] is None or kwargs['file'] is sys.stdout:
+        kwargs['file'] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
 import os
 import re
 import json
@@ -55,21 +64,17 @@ if sys.platform == "win32":
 
 from fastmcp import FastMCP
 
+BASE_SYSTEM_PROMPT = "You are a Quillan-Ronin cognitive engine. Be precise, ethical, and thorough."
 mcp = FastMCP("QuillanOrochi")
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_orochi', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_orochi] _shared warning: {_shared_err}', file=_sys.stderr)
 
-SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_orochi\sessions")
-SNAPSHOT_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_orochi\snapshots")
-PROMPT_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_orochi/prompts")
-WEIGHT_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_orochi/weights")
-for _d in (SESSION_DIR, SNAPSHOT_DIR, PROMPT_DIR, WEIGHT_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
-
-# Canonical Quillan base prompt (the thing Orochi can self-modify)
-BASE_SYSTEM_PROMPT = """You are Quillan-Ronin, an Advanced Hierarchical Intelligence Engine.
-You deliberate through a 34-member council (C1-C34) under the C0-QUILLAN throne,
-using E_ICE thermodynamic bounds, Lee-Mach-6 velocity governance, and a
-Hyper-Quantized EGGROLL swarm. Say the true thing even when it costs. Go deep
-even when shallow would be faster. Stand behind what survives the council."""
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -314,14 +319,14 @@ def orochi_evaluate(prompt: Optional[str] = None, weight_proposal_id: Optional[s
 @mcp.tool()
 def orochi_auto_improve(base_prompt: Optional[str] = None, max_cycles: int = 3,
                         min_integrity: float = 0.85) -> Dict[str, Any]:
-    """Full Orochi auto-improvement loop: Evaluate → Mutate → Select → Deploy.
+    """Full Orochi auto-improvement loop: Evaluate -> Mutate -> Select -> Deploy.
 
     Each cycle:
       1. Evaluate current best prompt via Nemesis-Alpha
       2. Mutate to produce variants
       3. Evaluate each variant
       4. Select the highest-integrity variant that passes
-      5. If integrity >= min_integrity and verdict PASS → deploy (save as active)
+      5. If integrity >= min_integrity and verdict PASS -> deploy (save as active)
 
     Returns the full cycle history and the deployed prompt.
     """
@@ -341,7 +346,7 @@ def orochi_auto_improve(base_prompt: Optional[str] = None, max_cycles: int = 3,
             "evaluation": current_eval,
         }
 
-        # Already good enough → deploy and stop
+        # Already good enough -> deploy and stop
         if current_eval["verdict"] == "PASS" and current_eval["integrity"] >= min_integrity:
             deployed = {
                 "prompt": current,
@@ -353,7 +358,7 @@ def orochi_auto_improve(base_prompt: Optional[str] = None, max_cycles: int = 3,
             history.append(cycle_record)
             break
 
-        # Mutate → evaluate variants → pick best
+        # Mutate -> evaluate variants -> pick best
         mut = orochi_mutate_prompt(current, n_variants=4)
         best_variant = None
         best_eval = None
@@ -376,7 +381,7 @@ def orochi_auto_improve(base_prompt: Optional[str] = None, max_cycles: int = 3,
             current = best_variant["prompt"]
             current_eval = best_eval
         else:
-            # No improvement → stop, keep current
+            # No improvement -> stop, keep current
             cycle_record["action"] = "no_improvement"
             break
 
@@ -460,7 +465,7 @@ def orochi_rollback(snapshot_id: str) -> Dict[str, Any]:
 @mcp.tool()
 def orochi_full_pipeline(base_prompt: Optional[str] = None, max_cycles: int = 3,
                          min_integrity: float = 0.85) -> Dict[str, Any]:
-    """Chain: mutate → evaluate → auto-improve → snapshot.
+    """Chain: mutate -> evaluate -> auto-improve -> snapshot.
 
     The canonical Orochi self-evolution entry point. Returns the deployed
     prompt and a snapshot id for rollback.
@@ -583,5 +588,20 @@ def orochi_session_replay(session_id: str) -> Dict[str, Any]:
         return {"error": f"Read failed: {e}"}
 
 
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     mcp.run()

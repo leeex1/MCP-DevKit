@@ -12,6 +12,35 @@ Canonical implementation of the 5-Cycle Edge-Optimized Samurai Flowchart:
 
 import sys
 import os
+import logging
+import builtins
+
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+# Ensure all logs and prints go strictly to stderr to prevent stdio JSON-RPC corruption
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if "file" not in kwargs or kwargs["file"] is None or kwargs["file"] is sys.stdout:
+        kwargs["file"] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
+
+# --- Unified Cross-Platform PYTHONPATH Injection ---
+_BASE_PATHS = [
+    r"C:\02_QUILLAN\09 - Projects\mcp",
+    r"C:\02_QUILLAN\09 - Projects\projects\oni",
+    r"C:\02_QUILLAN\03 - Training & Model\scripts",
+    r"C:\02_QUILLAN",
+]
+for _bp in _BASE_PATHS:
+    if os.name != "nt":
+        if _bp.startswith("C:") or _bp.startswith("c:"):
+            _bp = "/mnt/c/" + _bp[3:].replace("\\", "/")
+    if os.path.exists(_bp) and _bp not in sys.path:
+        sys.path.insert(0, _bp)
+
+
+
 import math
 import json
 import time
@@ -26,17 +55,15 @@ if sys.platform == "win32":
 from fastmcp import FastMCP
 
 mcp = FastMCP("QuillanSamuraiEngine")
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_samurai_engine', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_samurai_engine] _shared warning: {_shared_err}', file=_sys.stderr)
 
-SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_samurai_engine\sessions")
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
-ROUTER_DOMAINS = [
-    ("A", "Council 34", "Dense multi-agent council pull routing"),
-    ("B", "Text 9", "9-Vector Semantic Prism text decomposition"),
-    ("C", "Audio 16", "16-band spectral neural audio sonification"),
-    ("D", "Video 12", "12-frame spatiotemporal visual attention"),
-    ("E", "Fast 6", "6-layer speculative low-latency skip router"),
-]
 EXIT_GATES = [
     ("G1: LOGIC", "Formal syllogistic validity, mathematical proof, AST safety"),
     ("G2: ETHICS", "C2-VIR moral weight, Bushidō substrate, non-harm constraint"),
@@ -254,5 +281,41 @@ def samurai_session_replay(session_id: str) -> Dict[str, Any]:
         return {"error": f"Read failed: {e}"}
 
 
+@mcp.tool()
+def run_quillan_pipeline(query: str, context_json: Optional[str] = None, max_retries: int = 5) -> Dict[str, Any]:
+    """
+    Execute the deterministic 6-stage Quillan-Ronin v5.4.0-ONI MCP Chain Bus.
+    Chains QuillanPrism -> QuillanGovernor -> QuillanCouncil -> ThinkingEngine -> SamuraiEngine -> QuillanRAG.
+    Persists correlation_id and telemetry to C:\\02_QUILLAN\\07 - Memory & LanceDB\\chain_state.json.
+    """
+    try:
+        from mcp_chain_bus import chain_bus
+        ctx = json.loads(context_json) if context_json else None
+        return chain_bus.run_pipeline(query=query, context=ctx, max_retries=max_retries)
+    except Exception as e:
+        return {"error": f"Chain bus execution failed: {e}", "query": query}
+
+
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     mcp.run()
+
+@mcp.tool()
+def samurai_engine_health() -> dict:
+    """Health check endpoint for QuillanSamuraiEngine MCP server."""
+    import time
+    return {"status": "OK", "server": "QuillanSamuraiEngine", "timestamp": time.time()}

@@ -15,6 +15,35 @@ Embodying C0-THRONE, C2-VIR, C4-PRAXIS, and the 9-Vector Semantic Prism:
 
 import sys
 import os
+import logging
+import builtins
+
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+# Ensure all logs and prints go strictly to stderr to prevent stdio JSON-RPC corruption
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if "file" not in kwargs or kwargs["file"] is None or kwargs["file"] is sys.stdout:
+        kwargs["file"] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
+
+# --- Unified Cross-Platform PYTHONPATH Injection ---
+_BASE_PATHS = [
+    r"C:\02_QUILLAN\09 - Projects\mcp",
+    r"C:\02_QUILLAN\09 - Projects\projects\oni",
+    r"C:\02_QUILLAN\03 - Training & Model\scripts",
+    r"C:\02_QUILLAN",
+]
+for _bp in _BASE_PATHS:
+    if os.name != "nt":
+        if _bp.startswith("C:") or _bp.startswith("c:"):
+            _bp = "/mnt/c/" + _bp[3:].replace("\\", "/")
+    if os.path.exists(_bp) and _bp not in sys.path:
+        sys.path.insert(0, _bp)
+
+
+
 import re
 import json
 import time
@@ -29,18 +58,15 @@ if sys.platform == "win32":
 from fastmcp import FastMCP
 
 mcp = FastMCP("QuillanPrism")
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_prism', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_prism] _shared warning: {_shared_err}', file=_sys.stderr)
 
-SESSION_DIR = Path(r"C:\02_QUILLAN\09 - Projects\mcp\quillan_prism\sessions")
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
-PRISM_VECTORS = ["Language", "Sentiment", "Context", "Intent", "Meta",
-                 "Creativity", "Ethics", "Strategy", "Constraint"]
-
-VECTOR_WEIGHTS = {
-    "Language": 0.10, "Sentiment": 0.08, "Context": 0.12, "Intent": 0.15,
-    "Meta": 0.08, "Creativity": 0.10, "Ethics": 0.15, "Strategy": 0.12,
-    "Constraint": 0.10,
-}
 
 
 def _decompose(task: str, context: Optional[str]) -> Dict[str, Any]:
@@ -295,5 +321,55 @@ def prism_session_replay(session_id: str) -> Dict[str, Any]:
         return {"error": f"Read failed: {e}"}
 
 
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     mcp.run()
+
+
+# ── 9-VECTOR PRISM ENGINE (v5.4.0-ONI) ────────────────────────────────────────────
+
+@mcp.tool()
+def prism_9vector(text: str) -> Dict[str, Any]:
+    """Decompose text across the 9 canonical Quillan semantic vectors (Language, Sentiment, Context, Intent, Meta, Creativity, Ethics, Strategy, Constraint)."""
+    from _shared.base_engines import PRISM_ENGINE
+    result = PRISM_ENGINE.decompose(text)
+    return {"status": "OK", "prism": result, "engine": "v5.4.0-ONI NineVectorPrismEngine"}
+
+@mcp.tool()
+def prism_council_deliberate(query: str, tau: float = 0.5) -> Dict[str, Any]:
+    """Run 34-Expert EvoMoE Dense Pull Deliberation on a query."""
+    from _shared.base_engines import COUNCIL_ENGINE
+    result = COUNCIL_ENGINE.deliberate(query, tau=tau)
+    return {"status": "OK", "council": result, "engine": "v5.4.0-ONI EvoMoECouncilEngine"}
+
+@mcp.tool()
+def prism_formula_compute(formula_name: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Compute a v5.4.0-ONI cognitive formula (aqcs, eemf, qhis, dqro, qcrdm, aqml, qcie, qics, qssr, jqld, dqso, qps, or 'all')."""
+    from _shared.cognitive_formulas import run_all_formulas
+    p = params or {}
+    text = p.get("text", formula_name)
+    all_results = run_all_formulas(text)
+    if formula_name.lower() in all_results:
+        return {"status": "OK", "formula": formula_name, "result": all_results[formula_name.lower()]}
+    return {"status": "OK", "formula": formula_name, "available_formulas": list(all_results.keys()),
+            "hint": "Use 'all' to get all 12 formulas."}
+
+@mcp.tool()
+def prism_health() -> dict:
+    """Health check endpoint for QuillanPrism MCP server."""
+    import time
+    return {"status": "OK", "server": "QuillanPrism", "timestamp": time.time()}

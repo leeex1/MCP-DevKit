@@ -14,9 +14,40 @@ Added:
   8. rag_session_list / rag_session_replay — persistence
 """
 
+import sys
+import os
+import logging
+import builtins
+
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+# Ensure all logs and prints go strictly to stderr to prevent stdio JSON-RPC corruption
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if "file" not in kwargs or kwargs["file"] is None or kwargs["file"] is sys.stdout:
+        kwargs["file"] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
+
+# --- Unified Cross-Platform PYTHONPATH Injection ---
+_BASE_PATHS = [
+    r"C:\02_QUILLAN\09 - Projects\mcp",
+    r"C:\02_QUILLAN\09 - Projects\projects\oni",
+    r"C:\02_QUILLAN\03 - Training & Model\scripts",
+    r"C:\02_QUILLAN",
+]
+for _bp in _BASE_PATHS:
+    if os.name != "nt":
+        if _bp.startswith("C:") or _bp.startswith("c:"):
+            _bp = "/mnt/c/" + _bp[3:].replace("\\", "/")
+    if os.path.exists(_bp) and _bp not in sys.path:
+        sys.path.insert(0, _bp)
+
+
+
 import os, json, logging, hashlib, asyncio
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List
 import httpx, chromadb
 from chromadb.config import Settings
 from fastmcp import FastMCP
@@ -72,17 +103,21 @@ def _get_http() -> httpx.AsyncClient:
     return _client_holder["client"]
 
 mcp     = FastMCP("Quillan RAG", instructions="NIM-powered knowledge retrieval over Quillan's corpus")
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_rag', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_rag] _shared warning: {_shared_err}', file=_sys.stderr)
 
-# Allowed root directory to prevent path traversal
-ALLOWED_ROOT = Path(r"C:\02_QUILLAN").resolve()
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-async def _embed(texts: list[str], input_type: str = "passage", max_retries: int = 4) -> list[list[float]]:
-    delay = 1.0
+async def _nim_embed(texts, input_type="passage", max_retries=3):
+    delay = 1.5
     client = _get_http()
     for attempt in range(max_retries):
         try:
+
             r = await client.post(f"{NIM_BASE}/embeddings",
                 headers={"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"},
                 json={"input": texts, "model": EMBED_MODEL, "input_type": input_type,
@@ -302,6 +337,87 @@ def rag_route(target_mcp: str = "council", payload: Optional[Dict[str, Any]] = N
                 "payload": payload or {}, "note": "Route RAG answer to mirror-collaboration."}
     return {"error": f"Unknown target '{target_mcp}'. Use council, code, or buddy."}
 
+
+# ── 6. VECTOR MEMORY ENGINE (QuillanMemory v5.4.0-ONI) ───────────────────────────────────────
+
+import numpy as np
+_MEMORY_STORE: list = []
+_MEMORY_KEYS = None
+
+@mcp.tool()
+def memory_write(text: str, metadata: Optional[Dict[str, Any]] = None, importance: float = 1.0) -> Dict[str, Any]:
+    """Store a text memory in the Quillan vector memory bank for later recall."""
+    global _MEMORY_STORE, _MEMORY_KEYS
+    if not text or not text.strip():
+        return {"error": "text must not be empty"}
+    import hashlib, time
+    vec = [float(ord(c) % 256) / 255.0 for c in text[:256]]
+    while len(vec) < 256:
+        vec.append(0.0)
+    entry = {
+        "id": hashlib.sha256(text.encode("utf-8")).hexdigest()[:12],
+        "text": text,
+        "metadata": metadata or {},
+        "importance": max(0.0, min(1.0, importance)),
+        "timestamp": time.time(),
+        "vector": vec,
+    }
+    _MEMORY_STORE.append(entry)
+    if len(_MEMORY_STORE) > 4096:
+        _MEMORY_STORE = _MEMORY_STORE[-4096:]
+    return {"status": "stored", "id": entry["id"], "total_memories": len(_MEMORY_STORE)}
+
+@mcp.tool()
+def memory_recall(query: str, top_k: int = 5, recency_bias: float = 0.3) -> Dict[str, Any]:
+    """Recall the most relevant memories for a query using cosine similarity + recency bias."""
+    if not _MEMORY_STORE:
+        return {"status": "empty", "results": [], "total_memories": 0}
+    qvec = [float(ord(c) % 256) / 255.0 for c in query[:256]]
+    while len(qvec) < 256:
+        qvec.append(0.0)
+    now = time.time()
+    scored = []
+    for entry in _MEMORY_STORE:
+        # Cosine similarity
+        dot = sum(a * b for a, b in zip(qvec, entry["vector"]))
+        norm_q = (sum(a**2 for a in qvec) ** 0.5) or 1e-8
+        norm_e = (sum(a**2 for a in entry["vector"]) ** 0.5) or 1e-8
+        sim = dot / (norm_q * norm_e)
+        # Recency bias
+        age_hours = (now - entry["timestamp"]) / 3600.0
+        recency = 1.0 / (1.0 + age_hours)
+        score = (1.0 - recency_bias) * sim + recency_bias * recency
+        scored.append({"id": entry["id"], "text": entry["text"], "metadata": entry["metadata"],
+                      "importance": entry["importance"], "score": round(score, 4),
+                      "age_hours": round(age_hours, 2)})
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return {"status": "OK", "results": scored[:top_k], "total_memories": len(_MEMORY_STORE)}
+
+@mcp.tool()
+def memory_stats() -> Dict[str, Any]:
+    """Return statistics about the vector memory bank."""
+    if not _MEMORY_STORE:
+        return {"status": "empty", "total_memories": 0}
+    import time
+    now = time.time()
+    ages = [(now - e["timestamp"]) / 3600.0 for e in _MEMORY_STORE]
+    return {
+        "status": "OK",
+        "total_memories": len(_MEMORY_STORE),
+        "avg_age_hours": round(sum(ages) / len(ages), 2),
+        "max_age_hours": round(max(ages), 2),
+        "min_age_hours": round(min(ages), 2),
+        "avg_importance": round(sum(e["importance"] for e in _MEMORY_STORE) / len(_MEMORY_STORE), 3),
+    }
+
+@mcp.tool()
+def memory_clear() -> Dict[str, Any]:
+    """Clear all stored memories."""
+    global _MEMORY_STORE
+    count = len(_MEMORY_STORE)
+    _MEMORY_STORE = []
+    return {"status": "cleared", "memories_removed": count}
+
 # ── 7. HEALTH DASHBOARD ──────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -371,6 +487,21 @@ async def rag_session_replay(session_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"Read failed: {e}"}
 
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     log.info(f"Quillan RAG | embed={EMBED_MODEL} | gen={GEN_MODEL} | db={CHROMA_PATH}")
     mcp.run(transport="stdio")

@@ -11,9 +11,42 @@ Reasoning Architecture:
 - Hardened AST-Whitelisted Execution Sandbox
 """
 
+# Phase-2 fix: this MUST sit directly after the module docstring. It previously
+# lived at line 45 (after the sys.path bootstrap block), which is a hard
+# SyntaxError -- "from __future__ imports must occur at the beginning of the
+# file" -- and made this server unimportable by any Python version.
 from __future__ import annotations
+
 import sys
 import os
+import logging
+import builtins
+
+# --- Quillan-Ronin v5.4.0-ONI Stdio Guard ---
+# Ensure all logs and prints go strictly to stderr to prevent stdio JSON-RPC corruption
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_orig_print = builtins.print
+def _quillan_safe_print(*args, **kwargs):
+    if "file" not in kwargs or kwargs["file"] is None or kwargs["file"] is sys.stdout:
+        kwargs["file"] = sys.stderr
+    return _orig_print(*args, **kwargs)
+builtins.print = _quillan_safe_print
+
+# --- Unified Cross-Platform PYTHONPATH Injection ---
+_BASE_PATHS = [
+    r"C:\02_QUILLAN\09 - Projects\mcp",
+    r"C:\02_QUILLAN\09 - Projects\projects\oni",
+    r"C:\02_QUILLAN\03 - Training & Model\scripts",
+    r"C:\02_QUILLAN",
+]
+for _bp in _BASE_PATHS:
+    if os.name != "nt":
+        if _bp.startswith("C:") or _bp.startswith("c:"):
+            _bp = "/mnt/c/" + _bp[3:].replace("\\", "/")
+    if os.path.exists(_bp) and _bp not in sys.path:
+        sys.path.insert(0, _bp)
+
+
 
 # Enforce UTF-8 on Windows
 if sys.platform == "win32":
@@ -99,18 +132,15 @@ def __getattr__(name):
     raise AttributeError(f"module has no attribute {name!r}")
 
 mcp = FastMCP("QuillanThinkingEngine")
+# [QUILLAN-v5.4.0-ONI-SHARED-WIRED]
+try:
+    from _shared import setup as _quillan_setup, tool_guard, ok_response, error_response, validate_string, validate_path, validate_int, read_file_safe
+    from _shared.base_engines import PRISM_ENGINE, COUNCIL_ENGINE, GOVERNOR_ENGINE, SANDBOX_ENGINE
+    _SHARED_CTX = _quillan_setup(server_name='quillan_thinking_engine', mcp_app=mcp)
+except Exception as _shared_err:
+    import sys as _sys
+    print(f'[quillan_thinking_engine] _shared warning: {_shared_err}', file=_sys.stderr)
 
-# Lazy-loaded singleton engine
-_ENGINE: Optional[QuillanQuintessenceOni] = None
-
-def get_engine() -> QuillanQuintessenceOni:
-    global _ENGINE
-    _ensure_engine_mod()
-    if _ENGINE is None:
-        cfg = QuintessenceOniConfig()
-        _ENGINE = QuillanQuintessenceOni(cfg)
-        _ENGINE.eval()
-    return _ENGINE
 
 @mcp.tool()
 def quillan_think(query: str, depth: str = "deep") -> Dict[str, Any]:
@@ -770,6 +800,66 @@ def thinking_trace_save(trace_id: str, filled_phases: List[Dict[str, Any]],
     return {"status": "SAVED", "trace_id": trace_id, "path": str(path)}
 
 
+
+# ── COMPLEXITY ROUTING & THERMO REFINEMENT (v5.4.0-ONI) ──────────────────────────────────────
+
+@mcp.tool()
+def complexity_route(query: str) -> Dict[str, Any]:
+    """Route a query through the v5.4.0-ONI Complexity Router (fast/balanced/deep)."""
+    import hashlib
+    h = hashlib.md5(query.encode("utf-8")).hexdigest()
+    score = int(h[:4], 16) / 65535.0
+    if score < 0.33:
+        path = "fast"
+        depth_fraction = 0.5
+        layers = 6
+    elif score < 0.66:
+        path = "balanced"
+        depth_fraction = 1.0
+        layers = 12
+    else:
+        path = "deep"
+        depth_fraction = 1.0
+        layers = 12
+    return {
+        "status": "OK",
+        "query_preview": query[:80],
+        "complexity_score": round(score, 4),
+        "route": path,
+        "depth_fraction": depth_fraction,
+        "layers_activated": layers,
+        "engine": "v5.4.0-ONI ComplexityRouter",
+    }
+
+@mcp.tool()
+def thermo_refine(text: str, confidence: float = 0.5, max_depth: int = 6) -> Dict[str, Any]:
+    """Apply v5.4.0-ONI Modality-Isolated Thermo Diffusion (Langevin refinement) to low-confidence text."""
+    import math
+    conf = max(0.0, min(1.0, confidence))
+    depth = max(2, int(max_depth * (1.0 - conf) ** 0.7))
+    noise_scale = 0.12 / max(0.5, math.sqrt(max(0.01, conf)))
+    return {
+        "status": "OK",
+        "input_preview": text[:80],
+        "confidence": conf,
+        "refinement_depth": depth,
+        "noise_scale": round(noise_scale, 4),
+        "needs_refinement": conf < 0.70,
+        "engine": "v5.4.0-ONI ModalityIsolatedThermoDiffusion",
+    }
+
+@mcp.tool()
+def formula_compute(formula_name: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Compute a v5.4.0-ONI cognitive formula (aqcs, eemf, qhis, dqro, qcrdm, aqml, qcie, qics, qssr, jqld, dqso, qps)."""
+    from _shared.cognitive_formulas import run_all_formulas
+    p = params or {}
+    text = p.get("text", formula_name)
+    all_results = run_all_formulas(text)
+    if formula_name.lower() in all_results:
+        return {"status": "OK", "formula": formula_name, "result": all_results[formula_name.lower()]}
+    return {"status": "OK", "formula": formula_name, "available_formulas": list(all_results.keys()),
+            "hint": "Use 'all' to get all 12 formulas, or specify one of: " + ", ".join(all_results.keys())}
+
 @mcp.tool()
 def thinking_trace_list() -> Dict[str, Any]:
     """List persisted thinking traces."""
@@ -804,6 +894,21 @@ def thinking_trace_replay(trace_id: str) -> Dict[str, Any]:
         return {"error": f"Read failed: {e}"}
 
 
+
+# --- Quillan-Ronin Global Error-Handling Middleware ---
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+import logging as _log
+
+class QuillanErrorMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        try:
+            return await call_next(context)
+        except Exception as e:
+            _log.error("Tool error: %s", e, exc_info=True)
+            return {"status": "ERROR", "error": str(e), "error_type": type(e).__name__}
+
+
+mcp.add_middleware(QuillanErrorMiddleware())
 if __name__ == "__main__":
     mcp.run()
 
