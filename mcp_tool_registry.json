@@ -3,7 +3,7 @@
   "last_synced": "2026-10-21T15:44:15Z",
   "summary": {
     "quillan_mcp_servers": 19,
-    "quillan_mcp_tools": 348,
+    "quillan_mcp_tools": 356,
     "standard_mcps": {
       "servers": 13,
       "tools": 130
@@ -1857,7 +1857,7 @@
       ]
     },
     "quillan_prism": {
-      "tool_count": 12,
+      "tool_count": 20,
       "tools": [
         {
           "name": "prism_decompose",
