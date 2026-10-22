@@ -620,6 +620,307 @@ def ops_kernel_build(kernel_version: str = "6.8", config: str = "defconfig", arc
     }
 
 
+# ─── 22. ANSIBLE PLAYBOOK GENERATOR ──────────────────────────────────────────
+
+@mcp.tool()
+def ops_ansible_playbook(task: str = "deploy", hosts: str = "all", become: bool = True) -> Dict[str, Any]:
+    """Generate an Ansible playbook for configuration management."""
+    playbook = """---
+- name: %s
+  hosts: %s
+  become: %s
+  tasks:
+    - name: Ensure package is installed
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+    - name: Start and enable service
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+    - name: Copy config file
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify: reload nginx
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+""" % (task, hosts, str(become).lower())
+    return {"task": task, "hosts": hosts, "playbook": playbook,
+            "council_note": "C26-TECHNE: config management; C13-WARDEN: security hardening."}
+
+
+# ─── 23. HELM CHART GENERATOR ────────────────────────────────────────────────
+
+@mcp.tool()
+def ops_helm_chart(app_name: str = "quillan-app", chart_version: str = "0.1.0", app_version: str = "1.0.0") -> Dict[str, Any]:
+    """Generate a Helm chart structure for Kubernetes deployment."""
+    chart_yaml = """apiVersion: v2
+name: %s
+description: A Helm chart for %s
+type: application
+version: %s
+appVersion: "%s"
+""" % (app_name, app_name, chart_version, app_version)
+    values_yaml = """replicaCount: 2
+image:
+  repository: %s
+  pullPolicy: IfNotPresent
+  tag: "latest"
+service:
+  type: ClusterIP
+  port: 80
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+""" % app_name
+    return {"app_name": app_name, "chart_yaml": chart_yaml, "values_yaml": values_yaml,
+            "structure": ["Chart.yaml", "values.yaml", "templates/deployment.yaml", "templates/service.yaml", "templates/ingress.yaml", "templates/_helpers.tpl"],
+            "council_note": "C26-TECHNE: K8s packaging; C29-NAVIGATOR: deployment routing."}
+
+
+# ─── 24. SERVICE MESH CONFIG (ISTIO/LINKERD) ─────────────────────────────────
+
+@mcp.tool()
+def ops_service_mesh(mesh: str = "istio", app_name: str = "quillan-app") -> Dict[str, Any]:
+    """Generate service mesh configuration for Istio or Linkerd."""
+    if mesh.lower() == "istio":
+        config = """apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: %s
+spec:
+  hosts:
+  - %s.example.com
+  gateways:
+  - %s-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: %s
+        port:
+          number: 80
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+""" % (app_name, app_name, app_name, app_name)
+    else:
+        config = """# Linkerd configuration
+apiVersion: linkerd.io/v1alpha2
+kind: ServiceProfile
+metadata:
+  name: %s
+spec:
+  routes:
+  - name: default
+    condition:
+      pathRegex: .*
+    responseClasses:
+    - condition:
+        status:
+          min: 500
+          max: 599
+      isFailure: true
+""" % app_name
+    return {"mesh": mesh, "app_name": app_name, "config": config,
+            "features": ["mTLS", "traffic splitting", "circuit breaking", "retries", "timeouts"],
+            "council_note": "C26-TECHNE: mesh constraints; C13-WARDEN: mTLS security."}
+
+
+# ─── 25. LOAD BALANCER CONFIG ────────────────────────────────────────────────
+
+@mcp.tool()
+def ops_load_balancer(lb_type: str = "nginx", upstreams: str = "app1:8000,app2:8000", algorithm: str = "round_robin") -> Dict[str, Any]:
+    """Generate load balancer configuration for nginx or HAProxy."""
+    upstream_list = [u.strip() for u in upstreams.split(",") if u.strip()]
+    if lb_type.lower() == "nginx":
+        upstream_block = "\n".join(f"    server {u};" for u in upstream_list)
+        config = """upstream backend {
+%s
+}
+
+server {
+    listen 80;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+    }
+}
+""" % upstream_block
+    else:
+        config = """frontend http_front
+    bind *:80
+    default_backend http_back
+
+backend http_back
+    balance %s
+%s
+""" % (algorithm, "\n".join(f"    server s{i} {u} check" for i, u in enumerate(upstream_list)))
+    return {"lb_type": lb_type, "upstreams": upstream_list, "algorithm": algorithm, "config": config,
+            "council_note": "C26-TECHNE: LB constraints; C14-KAIDO: traffic optimization."}
+
+
+# ─── 26. SECRETS MANAGEMENT ──────────────────────────────────────────────────
+
+@mcp.tool()
+def ops_secrets_manager(provider: str = "vault", secrets: str = "DB_PASSWORD,API_KEY,JWT_SECRET") -> Dict[str, Any]:
+    """Generate secrets management configuration (Vault, AWS Secrets Manager, etc.)."""
+    secret_list = [s.strip() for s in secrets.split(",") if s.strip()]
+    configs = {
+        "vault": {"init": "vault server -dev", "store": "vault kv put secret/quillan %s" % " ".join(f"{s}=value" for s in secret_list),
+                  "read": "vault kv get secret/quillan", "features": ["dynamic secrets", "lease management", "audit logging"]},
+        "aws": {"store": "aws secretsmanager create-secret --name quillan/%s --secret-string 'value'" % secret_list[0] if secret_list else "secret",
+                "read": "aws secretsmanager get-secret-value --secret-id quillan/secret",
+                "features": ["rotation", "versioning", "IAM integration"]},
+        "k8s": {"store": "kubectl create secret generic quillan-secrets --from-literal=%s" % " --from-literal=".join(f"{s}=value" for s in secret_list),
+                "features": ["native K8s", "RBAC", "encryption at rest"]},
+    }
+    config = configs.get(provider.lower(), configs["vault"])
+    return {"provider": provider, "secrets": secret_list, "config": config,
+            "best_practices": ["never commit secrets", "rotate regularly", "least privilege", "audit access"],
+            "council_note": "C13-WARDEN: secret security; C2-VIR: ethical data handling."}
+
+
+# ─── 27. DATABASE MIGRATION ──────────────────────────────────────────────────
+
+@mcp.tool()
+def ops_db_migration(tool: str = "alembic", db_engine: str = "postgresql", migration_name: str = "add_users_table") -> Dict[str, Any]:
+    """Generate database migration configuration."""
+    configs = {
+        "alembic": {"init": "alembic init alembic", "create": f"alembic revision --autogenerate -m '{migration_name}'",
+                    "upgrade": "alembic upgrade head", "downgrade": "alembic downgrade -1",
+                    "config": "alembic.ini with sqlalchemy.url"},
+        "flyway": {"init": "flyway init", "create": f"flyway migrate (V1__{migration_name}.sql)",
+                   "upgrade": "flyway migrate", "info": "flyway info"},
+        "prisma": {"init": "npx prisma init", "create": "npx prisma migrate dev --name %s" % migration_name,
+                   "deploy": "npx prisma migrate deploy"},
+    }
+    config = configs.get(tool.lower(), configs["alembic"])
+    return {"tool": tool, "db_engine": db_engine, "migration_name": migration_name, "config": config,
+            "best_practices": ["always backup before migrate", "test on staging first", "idempotent migrations", "rollback plan"],
+            "council_note": "C28-CALCULUS: migration math; C13-WARDEN: data safety."}
+
+
+# ─── 28. GITOPS CONFIG (ARGOCD/FLUX) ────────────────────────────────────────
+
+@mcp.tool()
+def ops_gitops(tool: str = "argocd", app_name: str = "quillan-app", repo_url: str = "https://github.com/leeex1/MCP-DevKit") -> Dict[str, Any]:
+    """Generate GitOps configuration for ArgoCD or Flux."""
+    configs = {
+        "argocd": {
+            "application": f"""apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {app_name}
+spec:
+  project: default
+  source:
+    repoURL: {repo_url}
+    targetRevision: HEAD
+    path: k8s/
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true""",
+            "features": ["auto-sync", "self-heal", "prune", "rollback"],
+        },
+        "flux": {
+            "kustomization": f"""apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: {app_name}
+spec:
+  interval: 5m
+  path: ./k8s
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: {app_name}""",
+            "features": ["auto-reconcile", "prune", "health checks"],
+        },
+    }
+    config = configs.get(tool.lower(), configs["argocd"])
+    return {"tool": tool, "app_name": app_name, "config": config,
+            "council_note": "C29-NAVIGATOR: GitOps routing; C4-PRAXIS: deployment automation."}
+
+
+# ─── 29. HORIZONTAL POD AUTOSCALER ──────────────────────────────────────────
+
+@mcp.tool()
+def ops_hpa(app_name: str = "quillan-app", min_replicas: int = 1, max_replicas: int = 10, target_cpu: int = 70) -> Dict[str, Any]:
+    """Generate Horizontal Pod Autoscaler configuration."""
+    hpa = {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "metadata": {"name": app_name},
+        "spec": {
+            "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": app_name},
+            "minReplicas": min_replicas,
+            "maxReplicas": max_replicas,
+            "metrics": [{"type": "Resource", "resource": {"name": "cpu", "target": {"type": "Utilization", "averageUtilization": target_cpu}}}],
+            "behavior": {"scaleDown": {"stabilizationWindowSeconds": 300}, "scaleUp": {"stabilizationWindowSeconds": 0}},
+        },
+    }
+    return {"app_name": app_name, "hpa": hpa, "council_note": "C14-KAIDO: auto-scaling; C32-AEON: load prediction."}
+
+
+# ─── 30. DISTRIBUTED TRACING SETUP ───────────────────────────────────────────
+
+@mcp.tool()
+def ops_tracing(stack: str = "jaeger", service_name: str = "quillan-app") -> Dict[str, Any]:
+    """Generate distributed tracing configuration (Jaeger/Zipkin/Tempo)."""
+    configs = {
+        "jaeger": {"deploy": "kubectl apply -f jaeger.yaml", "endpoint": "http://jaeger-collector:14268/api/traces",
+                   "sdk": "opentelemetry-instrumentation", "sampling": "probabilistic (0.1)"},
+        "zipkin": {"deploy": "docker run -d -p 9411:9411 openzipkin/zipkin", "endpoint": "http://zipkin:9411/api/v2/spans",
+                   "sdk": "zipkin-python", "sampling": "const (1.0)"},
+        "tempo": {"deploy": "grafana/tempo", "endpoint": "http://tempo:3200", "sdk": "opentelemetry",
+                  "features": ["trace-to-logs", "trace-to-metrics"]},
+    }
+    config = configs.get(stack.lower(), configs["jaeger"])
+    return {"stack": stack, "service_name": service_name, "config": config,
+            "council_note": "C30-TESSERACT: tracing; C18-SHEPHERD: observability."}
+
+
+# ─── 31. MESSAGE QUEUE SETUP ─────────────────────────────────────────────────
+
+@mcp.tool()
+def ops_message_queue(broker: str = "rabbitmq", queues: str = "tasks,results,notifications") -> Dict[str, Any]:
+    """Generate message queue configuration (RabbitMQ/Kafka/Redis)."""
+    queue_list = [q.strip() for q in queues.split(",") if q.strip()]
+    configs = {
+        "rabbitmq": {"image": "rabbitmq:3-management", "port": 5672, "management_port": 15672,
+                     "queues": queue_list, "features": ["AMQP", "dead letter", "TTL"]},
+        "kafka": {"image": "confluentinc/cp-kafka", "port": 9092, "topics": queue_list,
+                  "features": ["partitioning", "replication", "consumer groups"]},
+        "redis": {"image": "redis:7", "port": 6379, "streams": queue_list,
+                  "features": ["pub/sub", "streams", "sorted sets"]},
+    }
+    config = configs.get(broker.lower(), configs["rabbitmq"])
+    return {"broker": broker, "queues": queue_list, "config": config,
+            "council_note": "C31-NEXUS: message routing; C14-KAIDO: throughput."}
+
+
 # --- Quillan-Ronin Global Error-Handling Middleware ---
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 import logging as _log
