@@ -3,7 +3,7 @@
   "last_synced": "2026-10-21T15:44:15Z",
   "summary": {
     "quillan_mcp_servers": 19,
-    "quillan_mcp_tools": 326,
+    "quillan_mcp_tools": 335,
     "standard_mcps": {
       "servers": 13,
       "tools": 130
@@ -1587,7 +1587,7 @@
       ]
     },
     "quillan_orchestrator": {
-      "tool_count": 5,
+      "tool_count": 14,
       "tools": [
         {
           "name": "orchestrator_chain",
